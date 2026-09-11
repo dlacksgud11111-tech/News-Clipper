@@ -501,6 +501,11 @@ class Pick(BaseModel):
         "나머지는 사건의 핵심어. 각 태그는 공백·특수문자 없이 붙여 쓴 한 단어, 12자 이내. "
         "# 기호는 붙이지 마십시오."
     )
+    title_ko: str = Field(
+        description="영문 기사일 때만 채웁니다. 영문 제목을 한국어로 옮긴 것. "
+        "요약하지 말고 제목에 있는 내용을 그대로 옮기십시오. "
+        "국문 기사는 반드시 빈 문자열로 두십시오."
+    )
     detail: str = Field(
         description="기사 제목에 없는 정보를 더하는 부연 한 줄. 금액·일정·규모·파급 중 하나. "
         "50자 이내. 제목을 바꿔 말하기만 할 거라면 빈 문자열."
@@ -541,18 +546,16 @@ SYSTEM = """\
 
 [작성 형식] — 최종 결과물은 아래처럼 렌더링됩니다.
 
-    #삼성EA #사우디 #비료플랜트
-    삼성E&A, 35억달러 규모 사우디 비료 프로젝트 수주        ← 기사 제목 원문 그대로
-    올해 해외 수주 최대 건, 연간 수주 목표 조기 달성         ← 당신이 쓰는 detail
-    🔗 원문 보기
+    삼성E&A, 35억달러 규모 사우디 비료 프로젝트 수주     ← 기사 제목 (굵게)
+    올해 해외 수주 최대 건, 연간 수주 목표 조기 달성      ← 당신이 쓰는 detail
+    🔗 원문 보기  ·  #삼성EA #사우디 #비료플랜트
 
-    #SMR #특별법 #상용화
-    “2035년 SMR 상용화 속도낸다”…‘SMR 특별법’ 본격 시행
-    2027년부터 민관 합동 상세설계 착수
-    🔗 원문 보기
+    가스터빈·전력망 수주잔고가 GE Vernova 실적 견인      ← 영문 기사는 title_ko
+    AI 전력수요가 실적 모멘텀으로
+    🔗 원문 보기  ·  #GEVernova #수주잔고 #가스터빈
 
-★ 제목은 당신이 쓰지 않습니다. 후보 목록의 기사 제목이 그대로 들어갑니다.
-   당신이 만드는 것은 tags 와 detail 두 가지뿐입니다.
+★ 국문 기사의 제목은 당신이 쓰지 않습니다. 후보 목록의 제목이 그대로 들어갑니다.
+   당신이 만드는 것은 tags, title_ko(영문 기사만), detail 세 가지입니다.
 
 - tags : 2~3개. 첫 번째는 주체(종목명·정부부처), 나머지는 사건의 핵심어입니다.
         각 태그는 붙여 쓴 한 단어여야 합니다 — 공백·점·괄호·& 를 넣지 마십시오.
@@ -560,10 +563,15 @@ SYSTEM = """\
         # 기호는 붙이지 마십시오. 렌더링할 때 자동으로 붙습니다.
         이 메시지 전체가 이미 {sector} 섹터이므로 "{sector}"를 태그로 쓰지 마십시오.
         같은 종목이 여러 날 반복돼도 태그 표기는 항상 똑같이 써야 나중에 검색됩니다.
+- title_ko : 후보가 (해외) 표시된 영문 기사일 때만 채웁니다. 영문 제목을 한국어로
+        옮기되 **요약하지 말고** 제목에 담긴 내용을 그대로 옮기십시오. 기업명·수치·
+        국가명은 살립니다. 예: "Gas Turbine And Grid Backlog Powers GE Vernova"
+        → "가스터빈·전력망 수주잔고가 GE Vernova 실적 견인".
+        (국내) 표시된 국문 기사는 **반드시 빈 문자열**로 두십시오. 국문 제목은
+        원문 그대로 나가야 합니다.
 - detail : 기사 제목에 **없는** 정보만 한 줄로 더합니다. 금액·일정·규모·파급 중
         하나면 충분합니다. 제목을 바꿔 말하기만 할 거라면 빈 문자열로 두십시오.
         명사형으로 끝냅니다. "~했다", "~입니다" 같은 서술형은 쓰지 마십시오.
-        제목이 영문인 기사는 detail을 한국어로 써서 핵심이 바로 읽히게 하십시오.
 
 [사실 원칙]
 - 후보 목록에 주어진 제목·요약에 있는 사실만 씁니다. 추측하거나 지어내지 마십시오.
@@ -694,14 +702,19 @@ def render(curation: Curation | None, shortlist: list[Cluster], title: str, subt
     if curation and curation.picks:
         for p in curation.picks:
             c = shortlist[p.id - 1]
-            tags = " ".join(f"#{hashtag(t)}" for t in p.tags[:3] if hashtag(t))
-            if tags:
-                out.append(f"\n<b>{esc(tags)}</b>")
-            # 제목은 요약하지 않고 대표 기사 원문 제목을 그대로 씁니다.
-            out.append(esc(c.lead.title))
+            # 제목이 가장 무겁게 보여야 합니다. 해시태그·링크는 파란 글씨라
+            # 그냥 두면 눈에 먼저 들어와 정작 제목이 묻힙니다.
+            # 그래서 제목은 굵게, 해시태그는 맨 아래 링크 옆으로 내립니다.
+            title = p.title_ko.strip() if p.title_ko.strip() else c.lead.title
+            out.append(f"\n<b>{esc(title)}</b>")
             if p.detail.strip():
                 out.append(esc(p.detail))
-            out.append(source_link(c))
+
+            tags = " ".join(f"#{hashtag(t)}" for t in p.tags[:3] if hashtag(t))
+            line = source_link(c)
+            if tags:
+                line += f"  ·  {esc(tags)}"
+            out.append(line)
     else:
         # AI 선별이 실패해도 빈손으로 보내지 않습니다.
         out.append("\n<i>(AI 선별 미실행 — 스코어 상위 기사)</i>")
