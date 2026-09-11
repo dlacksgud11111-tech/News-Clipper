@@ -1,0 +1,378 @@
+# ============================================================
+#  원전·건설 데일리 뉴스 클리핑 설정
+#  이 파일만 고치면 소스/키워드/분량이 전부 바뀝니다.
+# ============================================================
+
+# 메시지 맨 윗줄에 붙는 제목
+title: 원전·건설 Daily News
+
+timezone: Asia/Seoul
+
+# 수집 시간창. 오전 7시 실행 기준 25시간 = 전날 06시 ~ 당일 07시.
+# (전날 국내 업무시간 전체 + 밤사이 해외 뉴스를 모두 덮습니다)
+window_hours: 25
+
+# 1차 스코어링으로 추릴 개수 (20~30건)
+shortlist_size: 30
+
+# AI가 최종 선별할 개수
+final_size: 10
+
+# 최종 선별에 쓸 모델
+model: claude-opus-5
+
+
+# ------------------------------------------------------------
+# 1. Google News 검색 쿼리
+#    - Google News RSS는 OR / site: / when:Nd 연산자를 지원합니다.
+#    - lang: ko → 국내 매체 중심, en → 해외 매체 중심
+#    - 쿼리 안의 {window} 는 실행 시 when:2d 같은 값으로 치환됩니다.
+# ------------------------------------------------------------
+queries:
+  # ---- 국내 원전 ----
+  - name: 원전-국내-정책산업
+    lang: ko
+    q: "(원전 OR 원자력 OR 핵발전) (정책 OR 계획 OR 예산 OR 법안 OR 규제 OR 승인) {window}"
+  - name: 원전-국내-SMR
+    lang: ko
+    q: "(SMR OR 소형모듈원자로 OR 혁신형SMR OR i-SMR) {window}"
+  - name: 원전-국내-기업
+    lang: ko
+    q: "(한수원 OR 한국수력원자력 OR 두산에너빌리티 OR 한전기술 OR 한전KPS OR 우리기술 OR 비에이치아이) {window}"
+  - name: 원전-국내-수출프로젝트
+    lang: ko
+    q: "(원전 수출 OR 체코 원전 OR 폴란드 원전 OR 신한울 OR 새울 OR 원전 수주) {window}"
+  - name: 원전-국내-연료폐기물
+    lang: ko
+    q: "(사용후핵연료 OR 고준위 방폐장 OR 원전 해체 OR 핵연료 OR 우라늄 농축) {window}"
+
+  # ---- 국내 건설 ----
+  - name: 건설-국내-수주실적
+    lang: ko
+    q: "(건설 수주 OR 해외건설 수주 OR 수주잔고 OR 플랜트 수주 OR 시공능력평가) {window}"
+  - name: 건설-국내-대형사
+    lang: ko
+    q: "(현대건설 OR 삼성물산 건설 OR 대우건설 OR GS건설 OR DL이앤씨 OR 포스코이앤씨 OR HDC현대산업개발) {window}"
+  - name: 건설-국내-정책시장
+    lang: ko
+    q: "(건설경기 OR 건설업계 OR 공사비 OR 분양 OR 재건축 OR 정비사업 OR 미분양) {window}"
+  - name: 건설-국내-리스크
+    lang: ko
+    q: "(부동산PF OR PF 부실 OR 건설사 워크아웃 OR 중대재해 OR 공사 중단 OR 붕괴 사고) {window}"
+
+  # ---- 해외 ----
+  - name: nuclear-global-policy
+    lang: en
+    q: "(nuclear power OR nuclear plant) (policy OR approval OR licence OR license OR funding) {window}"
+  - name: nuclear-global-smr
+    lang: en
+    q: "(SMR OR \"small modular reactor\" OR microreactor) {window}"
+  - name: nuclear-global-deals
+    lang: en
+    q: "(nuclear) (contract OR order OR deal OR agreement OR construction start) {window}"
+  - name: nuclear-global-players
+    lang: en
+    q: "(Westinghouse OR EDF OR Rosatom OR NuScale OR GE Vernova OR Holtec OR X-energy OR Kairos) {window}"
+  - name: nuclear-global-fuel
+    lang: en
+    q: "(uranium OR enrichment OR nuclear fuel) (price OR supply OR contract OR sanction) {window}"
+  - name: construction-global
+    lang: en
+    q: "(construction OR engineering) (contract award OR EPC OR megaproject OR backlog) {window}"
+
+
+# ------------------------------------------------------------
+# 2. 특정 매체만 콕 집어서 보고 싶을 때
+#    site: 연산자로 해당 매체 기사만 긁어옵니다.
+#    (국내 건설·에너지 전문지는 자체 RSS를 막아둔 곳이 많아 이 방식이 안정적)
+# ------------------------------------------------------------
+site_queries:
+  - name: 대한경제
+    lang: ko
+    site: dnews.co.kr
+    q: "(원전 OR 건설 OR 수주 OR 플랜트)"
+  - name: 전기신문
+    lang: ko
+    site: electimes.com
+    q: "(원전 OR 전력 OR 에너지)"
+  - name: 한국경제-산업
+    lang: ko
+    site: hankyung.com
+    q: "(원전 OR 건설 수주 OR 플랜트)"
+  - name: Reuters
+    lang: en
+    site: reuters.com
+    q: "(nuclear OR construction contract)"
+
+
+# ------------------------------------------------------------
+# 3. 직접 RSS (전문지 — 구글뉴스가 잘 못 잡는 곳)
+# ------------------------------------------------------------
+feeds:
+  - name: World Nuclear News
+    lang: en
+    url: https://www.world-nuclear-news.org/rss
+  - name: Nuclear Engineering Intl
+    lang: en
+    url: https://www.neimagazine.com/feed/
+  - name: 전기신문
+    lang: ko
+    url: https://www.electimes.com/rss/allArticle.xml
+
+
+# ------------------------------------------------------------
+# 4. 1차 스코어링 키워드 (20~30건으로 추릴 때 씀)
+#    weight 가 높을수록 우선 선발됩니다.
+# ------------------------------------------------------------
+scoring:
+  # 주제 적합성 — 이게 하나도 없으면 아예 탈락시킵니다
+  topic:
+    weight: 3
+    words:
+      - 원전
+      - 원자력
+      - SMR
+      - 소형모듈원자로
+      - 핵연료
+      - 방폐장
+      - 한수원
+      - 건설
+      - 시공
+      - 플랜트
+      - 토목
+      - 건축
+      - 수주
+      - 분양
+      - 재건축
+      - nuclear
+      - reactor
+      - uranium
+      - enrichment
+      - construction
+      - engineering
+      - EPC
+
+  # 중요도 축 1~4 — 사용자가 고른 4개 축에 해당하는 사건 신호어
+  event:
+    weight: 5
+    words:
+      # 수주·계약·실적
+      - 수주
+      - 계약
+      - 체결
+      - 낙찰
+      - 선정
+      - 우선협상
+      - 착공
+      - 준공
+      - 수출
+      - 실적
+      - 영업이익
+      - 수주잔고
+      - 공급계약
+      - contract
+      - award
+      - order
+      - deal
+      - agreement
+      - signed
+      - earnings
+      - backlog
+      # 정책·규제
+      - 정책
+      - 법안
+      - 시행령
+      - 규제
+      - 인가
+      - 허가
+      - 승인
+      - 예산
+      - 로드맵
+      - 기본계획
+      - 특별법
+      - policy
+      - approval
+      - licence
+      - license
+      - regulator
+      - subsidy
+      - funding
+      # 프로젝트·기술
+      - 건설허가
+      - 운영허가
+      - 상업운전
+      - 계속운전
+      - 설계
+      - 실증
+      - 표준설계
+      - construction start
+      - commissioning
+      - grid connection
+      - milestone
+      # 리스크·사고
+      - 사고
+      - 중단
+      - 지연
+      - 붕괴
+      - 부실
+      - 워크아웃
+      - 법정관리
+      - 중대재해
+      - 소송
+      - 제재
+      - 파업
+      - halt
+      - delay
+      - suspended
+      - accident
+      - lawsuit
+      - sanction
+      - default
+
+  # 시장 영향력이 큰 주체
+  player:
+    weight: 2
+    words:
+      - 한국수력원자력
+      - 두산에너빌리티
+      - 한전기술
+      - 한전KPS
+      - 현대건설
+      - 삼성물산
+      - 대우건설
+      - GS건설
+      - DL이앤씨
+      - 포스코이앤씨
+      - 삼성E&A
+      - 산업통상자원부
+      - 국토교통부
+      - 원자력안전위원회
+      - Westinghouse
+      - EDF
+      - Rosatom
+      - NuScale
+      - Holtec
+      - X-energy
+      - IAEA
+      - DOE
+
+  # 노이즈 — 점수를 깎습니다.
+  # event(+5)가 여러 개 걸린 진짜 뉴스는 살아남도록 -8로 둡니다.
+  noise:
+    weight: -8
+    words:
+      # 지면 채우기성
+      - 부고
+      - 인사동정
+      - 포토
+      - 사설
+      - 오늘의
+      - 운세
+      - 날씨
+      - 채용
+      - 기고
+      - 칼럼
+      - obituary
+      - opinion
+      - sponsored
+      # 주가 시황·수급 기사 (기업 펀더멘털 뉴스가 아님)
+      - 특징주
+      - 상한가
+      - 하한가
+      - 장중
+      - 주가
+      - 급등
+      - 급락
+      - 강세
+      - 약세
+      - 시황
+      - 수혜주
+      - 테마주
+      - 개미
+      - 매수세
+      - 코스피 마감
+      - 코스닥 마감
+      - shares rise
+      - shares fall
+      - stock jumps
+      # 홍보·사회공헌·행사성
+      - 사회공헌
+      - 봉사활동
+      - 기부
+      - 후원
+      - 초청
+      - 견학
+      - 체험
+      - 캠페인
+      - 공모전
+      - 기념식
+      - 간담회
+      - 워크숍
+      - 시상식
+      - 창립
+      - 모델하우스
+      - 분양 광고
+
+# ------------------------------------------------------------
+# 5. 하드 차단 목록
+#    제목에 이 단어가 들어가면 점수와 무관하게 즉시 버립니다.
+#    (홍보성 기사가 "여러 매체가 받아썼다" 보너스로 살아남는 걸 막습니다)
+#    ※ 제목에만 적용하므로 본문에 우연히 섞인 단어로는 탈락하지 않습니다.
+# ------------------------------------------------------------
+blocklist:
+  # 주가 시황·수급
+  - 특징주
+  - 상한가
+  - 하한가
+  - 장중
+  - 급등
+  - 급락
+  - 코스피
+  - 코스닥
+  - 수혜주
+  - 테마주
+  - 개미
+  - 매수세
+  - 주가 전망
+  - 목표주가
+  - stock forum
+  - shares rise
+  - shares fall
+  - stock jumps
+  - stock price
+  # 홍보·사회공헌·행사
+  - 유소년
+  - 봉사활동
+  - 기부
+  - 후원
+  - 초청
+  - 견학
+  - 캠페인
+  - 공모전
+  - 기념식
+  - 시상식
+  - 창립기념
+  - 임직원
+  - 모델하우스
+  # 지면 채우기
+  - 부고
+  - 인사동정
+  - 포토
+  - 오늘의 운세
+  - 사설
+  - 독자투고
+
+# 같은 사건을 여러 매체가 받아썼을 때 주는 가산점 (매체 1곳 추가당)
+cluster_bonus: 3
+# 제목 유사도가 이 값 이상이면 같은 사건으로 묶습니다 (0~1).
+# 낮추면 더 공격적으로 묶고, 높이면 비슷한 기사도 따로 셉니다.
+dedup_threshold: 0.45
+
+# 숏리스트를 채울 때 쓰는 더 느슨한 글자 임계값.
+shortlist_dedup_threshold: 0.30
+
+# 숏리스트 단어 겹침 임계값. 위에서 안 묶인 "같은 사건, 다른 제목"이
+# 자리를 여러 개 먹는 걸 막습니다. 낮출수록 주제가 다양해지지만
+# 무관한 기사까지 같은 사건으로 오인할 수 있습니다. (0.40 권장)
+# 국문↔영문 중복은 문자 비교로 못 잡으므로 AI 선별 단계에서 한 번 더 걸러냅니다.
+shortlist_word_overlap: 0.40
