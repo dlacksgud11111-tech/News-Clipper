@@ -102,6 +102,40 @@ def strip_html(s: str) -> str:
     return html.unescape(_TAG_RE.sub(" ", s or "")).strip()
 
 
+_OUTLET_TAIL_RE = re.compile(r"\s+[-–—]\s+[^-–—]{1,40}$")
+
+
+def clean_title(title: str, outlet: str = "") -> str:
+    """화면에 그대로 나갈 기사 제목을 다듬습니다.
+
+    Google News는 제목 끝에 " - 매체명"을 붙입니다. <source>에서 받은 매체명을
+    통째로 떼어내는 방식이 가장 확실합니다 — 정규식만 쓰면 매체명 자체에
+    하이픈이 든 경우(g-enews.com)를 놓쳐서 제목에 그대로 남습니다.
+
+    말줄임표도 함께 통일합니다. 매체마다 "...", "…", "… " 가 뒤섞여 있어
+    붙은 것과 띄어진 것이 한 메시지에 같이 보이면 지저분합니다.
+    """
+    t = (title or "").strip()
+
+    if outlet:
+        for dash in ("-", "–", "—"):
+            suffix = f" {dash} {outlet}"
+            if t.endswith(suffix):
+                t = t[: -len(suffix)].strip()
+                break
+        else:
+            t = _OUTLET_TAIL_RE.sub("", t).strip()
+    else:
+        t = _OUTLET_TAIL_RE.sub("", t).strip()
+
+    # "...", "···", "‥", "⋯" 이 매체마다 뒤섞여 들어옵니다. 가운뎃점은 한 개일 때
+    # "수지삼성4·수영1" 처럼 구분자로 쓰이므로 두 개 이상일 때만 말줄임표로 봅니다.
+    t = re.sub(r"[.·‥⋯]{2,}", "…", t)
+    t = re.sub(r"…+", "…", t)
+    t = re.sub(r"\s*…\s*", "…", t)  # 말줄임표 앞뒤 공백 제거
+    return re.sub(r"\s{2,}", " ", t).strip()
+
+
 def normalize_title(title: str) -> str:
     """제목을 비교용으로 정규화. 매체명 꼬리표·말머리·기호를 털어냅니다."""
     t = html.unescape(title or "")
@@ -230,7 +264,7 @@ def parse_entry(entry: dict, lang: str, group: str, tz: timezone) -> Article | N
         outlet = m.group(1).strip() if m else group
 
     return Article(
-        title=re.sub(r"\s+[-–—]\s+[^-–—]{1,40}$", "", title).strip(),
+        title=clean_title(title, outlet),
         url=entry.get("link", ""),
         outlet=outlet,
         published=published,
@@ -546,13 +580,15 @@ SYSTEM = """\
 
 [작성 형식] — 최종 결과물은 아래처럼 렌더링됩니다.
 
+    #삼성EA #사우디 #비료플랜트
     삼성E&A, 35억달러 규모 사우디 비료 프로젝트 수주     ← 기사 제목 (굵게)
     올해 해외 수주 최대 건, 연간 수주 목표 조기 달성      ← 당신이 쓰는 detail
-    🔗 원문 보기  ·  #삼성EA #사우디 #비료플랜트
+    🔗 원문 보기
 
+    #GEVernova #수주잔고 #가스터빈
     가스터빈·전력망 수주잔고가 GE Vernova 실적 견인      ← 영문 기사는 title_ko
     AI 전력수요가 실적 모멘텀으로
-    🔗 원문 보기  ·  #GEVernova #수주잔고 #가스터빈
+    🔗 원문 보기
 
 ★ 국문 기사의 제목은 당신이 쓰지 않습니다. 후보 목록의 제목이 그대로 들어갑니다.
    당신이 만드는 것은 tags, title_ko(영문 기사만), detail 세 가지입니다.
@@ -702,19 +738,19 @@ def render(curation: Curation | None, shortlist: list[Cluster], title: str, subt
     if curation and curation.picks:
         for p in curation.picks:
             c = shortlist[p.id - 1]
-            # 제목이 가장 무겁게 보여야 합니다. 해시태그·링크는 파란 글씨라
-            # 그냥 두면 눈에 먼저 들어와 정작 제목이 묻힙니다.
-            # 그래서 제목은 굵게, 해시태그는 맨 아래 링크 옆으로 내립니다.
-            title = p.title_ko.strip() if p.title_ko.strip() else c.lead.title
-            out.append(f"\n<b>{esc(title)}</b>")
+            # 해시태그는 맨 위에 두되 굵게 처리하지 않습니다. 파란 글씨라
+            # 그냥 두면 눈에 먼저 들어와 정작 제목이 묻히기 때문입니다.
+            # 굵은 것은 제목 하나뿐이어야 시선이 제목에 먼저 닿습니다.
+            tags = " ".join(f"#{hashtag(t)}" for t in p.tags[:3] if hashtag(t))
+            out.append(f"\n{esc(tags)}" if tags else "")
+
+            # 국문은 원문 제목 그대로, 영문은 한국어로 옮긴 제목을 씁니다.
+            title = p.title_ko.strip() or c.lead.title
+            out.append(f"<b>{esc(title)}</b>")
+
             if p.detail.strip():
                 out.append(esc(p.detail))
-
-            tags = " ".join(f"#{hashtag(t)}" for t in p.tags[:3] if hashtag(t))
-            line = source_link(c)
-            if tags:
-                line += f"  ·  {esc(tags)}"
-            out.append(line)
+            out.append(source_link(c))
     else:
         # AI 선별이 실패해도 빈손으로 보내지 않습니다.
         out.append("\n<i>(AI 선별 미실행 — 스코어 상위 기사)</i>")
