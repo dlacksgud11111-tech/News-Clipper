@@ -21,6 +21,7 @@ import html
 import os
 import re
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -664,17 +665,41 @@ def curate(shortlist: list[Cluster], cfg: dict, sector: str, size: int,
 
     print(f"  · {sector}: 후보 {len(shortlist)}건 → Claude 판단 중")
     client = anthropic.Anthropic(api_key=api_key)
-    try:
-        response = client.messages.parse(
-            model=cfg["model"],
-            max_tokens=16000,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            output_format=Curation,
-        )
-    except anthropic.APIError as e:
-        print(f"  ! Claude 호출 실패: {e}", file=sys.stderr)
+
+    # 한 섹터만 조용히 실패해서 폴백으로 나가는 일이 있었습니다. 원인을 알 수
+    # 있도록 예외 종류를 구분해 찍고, 일시적 실패는 한 번 더 시도합니다.
+    response = None
+    for attempt in (1, 2):
+        try:
+            response = client.messages.parse(
+                model=cfg["model"],
+                max_tokens=16000,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+                output_format=Curation,
+            )
+            break
+        except (anthropic.RateLimitError, anthropic.APIConnectionError, anthropic.APITimeoutError) as e:
+            kind = type(e).__name__
+            if attempt == 1:
+                print(f"    {kind} — 10초 후 재시도", file=sys.stderr)
+                time.sleep(10)
+                continue
+            print(f"  ! {sector} 실패: {kind} (재시도도 실패) — {e}", file=sys.stderr)
+        except anthropic.APIStatusError as e:
+            # 400/401/404 등은 다시 시도해도 같은 결과이므로 바로 포기합니다.
+            print(f"  ! {sector} 실패: HTTP {e.status_code} {type(e).__name__} — {e}", file=sys.stderr)
+        except Exception as e:
+            # 스키마 검증 실패(응답이 잘렸을 때 등)도 여기로 들어옵니다.
+            print(f"  ! {sector} 실패: {type(e).__name__} — {e}", file=sys.stderr)
         return None
+
+    if response.stop_reason == "refusal":
+        detail = getattr(response.stop_details, "category", None)
+        print(f"  ! {sector} 실패: 모델이 응답을 거부했습니다 (category={detail})", file=sys.stderr)
+        return None
+    if response.stop_reason == "max_tokens":
+        print(f"  ! {sector} 경고: 응답이 max_tokens 에서 잘렸습니다", file=sys.stderr)
 
     result = response.parsed_output
     # 모델이 범위 밖 번호를 주거나 같은 기사를 두 번 고르는 경우를 대비합니다.
@@ -727,9 +752,11 @@ def source_link(c: Cluster) -> str:
     return f'<a href="{esc_attr(c.lead.url)}">🔗 원문 보기</a>'
 
 
-def render(curation: Curation | None, shortlist: list[Cluster], title: str, subtitle: str) -> list[str]:
+def render(curation: Curation | None, shortlist: list[Cluster], title: str, subtitle: str,
+           emoji: str = "") -> list[str]:
     """텔레그램 HTML 메시지 본문을 만듭니다."""
-    out = [f"<b>■ {esc(title)}</b>", f"<i>{esc(subtitle)}</i>"]
+    head = f"{emoji} {title}".strip() if emoji else title
+    out = [f"<b>{esc(head)}</b>", f"<i>{esc(subtitle)}</i>"]
 
     if curation and curation.picks:
         for p in curation.picks:
@@ -742,8 +769,10 @@ def render(curation: Curation | None, shortlist: list[Cluster], title: str, subt
             # (태그가 없으면 위에서 빈 문자열이 들어가 빈 줄 하나로 구분됩니다)
 
             # 국문은 원문 제목 그대로, 영문은 한국어로 옮긴 제목을 씁니다.
+            # 굵게 처리하지 않습니다 — 제목이 줄을 넘길 때 뒷부분이 따로
+            # 떨어져 보이는 문제가 있어서, 본문 서식을 아예 비웠습니다.
             title = p.title_ko.strip() or c.lead.title
-            out.append(f"<b>{esc(title)}</b>")
+            out.append(esc(title))
             out.append(source_link(c))
     else:
         # AI 선별이 실패해도 빈손으로 보내지 않습니다.
@@ -847,7 +876,8 @@ def main() -> int:
             continue
 
         curation = None if args.no_ai else curate(shortlist, cfg, sector, size, f"{start:%Y-%m-%d}")
-        chunks = render(curation, shortlist, d["title"], f"{now:%Y.%m.%d} ({weekday})")
+        chunks = render(curation, shortlist, d["title"],
+                        f"{now:%Y.%m.%d} ({weekday})", d.get("emoji", ""))
 
         if args.dry_run:
             print("\n" + "=" * 60)

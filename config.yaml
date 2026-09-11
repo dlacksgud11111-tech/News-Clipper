@@ -22,24 +22,28 @@ timezone: Asia/Seoul
 # ------------------------------------------------------------
 digests:
   - sector: 원전
+    emoji: ⚛️
     title: 원전 Daily News
     size: 8
     pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_NUCLEAR
 
   - sector: 건설
+    emoji: 🏗️
     title: 건설 Daily News
     size: 8
     pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_CONSTRUCTION
 
   - sector: 유틸리티
+    emoji: ⚡
     title: 유틸리티 Daily News
     size: 8
     pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_UTILITY
 
   - sector: 전력기기
+    emoji: 🔌
     title: 전력기기 Daily News
     size: 8
     pool: 24
@@ -746,6 +750,11 @@ blocklist:
   - 대회 개최
   - 우수 사업
   - awards
+  - 경기대회
+  - 기능경기
+  - 종합우승
+  - 체육대회
+  - 축제
   # 기업 내부 관리·고객서비스 (주가·업황과 무관)
   - 매뉴얼
   - 조직개편
