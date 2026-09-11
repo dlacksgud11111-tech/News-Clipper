@@ -64,6 +64,7 @@ class Cluster:
     score: float = 0.0
     coverage: list[str] = field(default_factory=list)  # 제목에 등장한 커버리지 종목
     sector: str = ""  # 원전 / 건설 / 유틸리티 / 전력기기
+    industry: bool = False  # 산업·정책 쿼리에서 나온 기사인가
 
     @property
     def lead(self) -> Article:
@@ -104,6 +105,29 @@ def strip_html(s: str) -> str:
 
 
 _OUTLET_TAIL_RE = re.compile(r"\s+[-–—]\s+[^-–—]{1,40}$")
+_LEAD_BRACKET_RE = re.compile(r"^\s*[\[【(]([^\]】)]{1,20})[\]】)]\s*")
+
+# 기사 가치를 담은 말머리는 남깁니다. 나머지(코너명·기사 유형)는 떼어냅니다.
+KEEP_BRACKETS = ("단독", "속보", "긴급", "특징주")
+
+
+def strip_lead_brackets(t: str) -> str:
+    """제목 앞의 [해설] [기획취재] [증권言言] 같은 코너명을 떼어냅니다.
+
+    [단독], [속보] 처럼 기사 가치를 알려주는 말머리는 남깁니다.
+    말머리가 두 개 붙은 제목도 있어 반복해서 벗겁니다.
+    """
+    while True:
+        m = _LEAD_BRACKET_RE.match(t)
+        if not m:
+            return t
+        inner = m.group(1).strip()
+        if any(k in inner for k in KEEP_BRACKETS):
+            return t
+        stripped = t[m.end():].strip()
+        if not stripped:  # 제목이 통째로 대괄호뿐이면 그대로 둡니다
+            return t
+        t = stripped
 
 
 def clean_title(title: str, outlet: str = "") -> str:
@@ -134,6 +158,7 @@ def clean_title(title: str, outlet: str = "") -> str:
     t = re.sub(r"[.·‥⋯]{2,}", "…", t)
     t = re.sub(r"…+", "…", t)
     t = re.sub(r"\s*…\s*", "…", t)  # 말줄임표 앞뒤 공백 제거
+    t = strip_lead_brackets(t)
     return re.sub(r"\s{2,}", " ", t).strip()
 
 
@@ -416,6 +441,8 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
     coverage_weight = cfg.get("coverage_weight", 8)
     sector_words = {s: list(w) for s, w in (cfg.get("sectors") or {}).items()}
     cov_sector = coverage_sectors(cfg)
+    industry_markers = list(cfg.get("industry_query_markers") or [])
+    industry_weight = cfg.get("industry_weight", 6)
 
     scored: list[Cluster] = []
     dropped = 0
@@ -457,6 +484,17 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
         # 최신 기사 가산 (24시간에 걸쳐 0~4점)
         age_h = (end - c.lead.published).total_seconds() / 3600
         score += max(0.0, 4.0 - age_h / 6)
+
+        # 어떤 쿼리가 이 기사를 찾았는지가 "산업·정책 기사"의 가장 정확한
+        # 신호입니다. 제목에 종목명이 없다는 것만으로는 재건축 시공사 선정
+        # 같은 개별 프로젝트 기사까지 산업 기사로 잡히기 때문입니다.
+        c.industry = any(
+            m in a.group for a in c.articles for m in industry_markers
+        )
+        # 정책·업황 기사는 커버리지 가산점(+8~16)을 받을 수 없어 구조적으로
+        # 점수가 낮습니다. 그대로 두면 기업 뉴스에 항상 밀리므로 보정합니다.
+        if c.industry:
+            score += industry_weight
 
         c.score = score
         c.sector = infer_sector(c, sector_words, cov_sector)
@@ -502,15 +540,37 @@ class Picker:
 
 
 def shortlist_for(sector: str, pool: int, scored: list[Cluster], cfg: dict) -> list[Cluster]:
-    """한 섹터의 후보를 뽑습니다. 국내/해외 비율도 여기서 맞춥니다."""
+    """한 섹터의 후보를 뽑습니다.
+
+    두 가지를 여기서 보장합니다.
+
+    1) 산업·정책 기사 몫  — 커버리지 종목명이 제목에 있으면 가산점이 커서,
+       그냥 점수순으로 뽑으면 후보가 개별 기업 뉴스로만 채워집니다. 부동산
+       대책·중대재해처벌법·전력수급기본계획처럼 종목명이 없지만 섹터 전체에
+       영향을 주는 기사 자리를 먼저 떼어둡니다.
+    2) 국내/해외 비율    — 해외 쿼리는 범위가 넓어 커버리지와 무관한 기사가
+       많이 걸립니다. 반반으로 두면 저품질 외신이 자리를 절반이나 먹습니다.
+    """
     picker = Picker(cfg["shortlist_dedup_threshold"], cfg["shortlist_word_overlap"])
     mine = [c for c in scored if c.sector == sector]
 
-    # 해외 쿼리는 범위가 넓어 커버리지와 무관한 기사가 많이 걸립니다.
-    # 반반으로 두면 저품질 외신이 자리를 절반이나 차지하므로 국내에 더 줍니다.
+    # 1) 산업·정책 몫: 산업·정책 쿼리에서 나온 기사로 먼저 채웁니다.
+    #    단 점수 문턱을 둡니다 — 정책 쿼리는 검색어가 넓어 공공기관 홍보나
+    #    사진기사까지 끌고 오는데, 그런 걸 자리만 채우려고 넣으면 손해입니다.
+    industry_quota = round(pool * cfg.get("shortlist_industry_ratio", 0))
+    floor = cfg.get("industry_min_score", 0)
+    if industry_quota:
+        taken = 0
+        for c in mine:
+            if taken >= industry_quota:
+                break
+            if c.industry and c.score >= floor and picker.take(c):
+                taken += 1
+
+    # 2) 나머지는 점수순으로, 국내/해외 비율을 맞춰 채웁니다.
     ko_quota = round(pool * cfg["shortlist_ko_ratio"])
     for lang, quota in (("ko", ko_quota), ("en", pool - ko_quota)):
-        taken = 0
+        taken = sum(1 for c in picker.picked if c.lead.lang == lang)
         for c in mine:
             if taken >= quota:
                 break
