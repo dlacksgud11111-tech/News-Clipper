@@ -2,7 +2,9 @@ name: 원전·건설 데일리 클리핑
 
 on:
   schedule:
-    - cron: "0 22 * * *"
+    # 21:47 UTC = 06:47 KST (한국시간 매일 오전 6시 47분)
+    # 정각(분=0)은 전 세계에서 가장 붐벼서 GitHub이 실행을 늦추거나 건너뜁니다.
+    - cron: "47 21 * * *"
   workflow_dispatch:
 
 concurrency:
