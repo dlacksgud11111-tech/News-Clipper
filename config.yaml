@@ -23,26 +23,26 @@ timezone: Asia/Seoul
 digests:
   - sector: 원전
     title: 원전 Daily News
-    size: 6
-    pool: 18
+    size: 8
+    pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_NUCLEAR
 
   - sector: 건설
     title: 건설 Daily News
-    size: 6
-    pool: 18
+    size: 8
+    pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_CONSTRUCTION
 
   - sector: 유틸리티
     title: 유틸리티 Daily News
-    size: 5
-    pool: 15
+    size: 8
+    pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_UTILITY
 
   - sector: 전력기기
     title: 전력기기 Daily News
-    size: 5
-    pool: 15
+    size: 8
+    pool: 24
     chat_id_env: TELEGRAM_CHAT_ID_EQUIPMENT
 
 

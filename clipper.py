@@ -501,13 +501,9 @@ class Pick(BaseModel):
         "나머지는 사건의 핵심어. 각 태그는 공백·특수문자 없이 붙여 쓴 한 단어, 12자 이내. "
         "# 기호는 붙이지 마십시오."
     )
-    headline: str = Field(
-        description="핵심 사실 한 줄. 주체(기업·정부)를 문장 안에 포함시킵니다. "
-        "명사형으로 끝냅니다(수주/체결/시행/정지). 존댓말·서술형 금지. 45자 이내."
-    )
     detail: str = Field(
-        description="headline에 없는 정보를 더하는 부연. 금액·일정·규모·의미 중 하나. "
-        "40자 이내. 더할 정보가 없으면 빈 문자열."
+        description="기사 제목에 없는 정보를 더하는 부연 한 줄. 금액·일정·규모·파급 중 하나. "
+        "50자 이내. 제목을 바꿔 말하기만 할 거라면 빈 문자열."
     )
 
 
@@ -546,14 +542,17 @@ SYSTEM = """\
 [작성 형식] — 최종 결과물은 아래처럼 렌더링됩니다.
 
     #삼성EA #사우디 #비료플랜트
-    사우디 비료 프로젝트 EPC 수주
-    35억달러(약 4조7000억원), 올해 해외 수주 최대
-    🔗 원문 보기 · 뉴시스 외 9곳
+    삼성E&A, 35억달러 규모 사우디 비료 프로젝트 수주        ← 기사 제목 원문 그대로
+    올해 해외 수주 최대 건, 연간 수주 목표 조기 달성         ← 당신이 쓰는 detail
+    🔗 원문 보기
 
     #SMR #특별법 #상용화
-    SMR 특별법·시행령 11일 시행
-    2027년 민관 합동 상세설계 착수
-    🔗 원문 보기 · 뉴스웍스 외 3곳
+    “2035년 SMR 상용화 속도낸다”…‘SMR 특별법’ 본격 시행
+    2027년부터 민관 합동 상세설계 착수
+    🔗 원문 보기
+
+★ 제목은 당신이 쓰지 않습니다. 후보 목록의 기사 제목이 그대로 들어갑니다.
+   당신이 만드는 것은 tags 와 detail 두 가지뿐입니다.
 
 - tags : 2~3개. 첫 번째는 주체(종목명·정부부처), 나머지는 사건의 핵심어입니다.
         각 태그는 붙여 쓴 한 단어여야 합니다 — 공백·점·괄호·& 를 넣지 마십시오.
@@ -561,11 +560,10 @@ SYSTEM = """\
         # 기호는 붙이지 마십시오. 렌더링할 때 자동으로 붙습니다.
         이 메시지 전체가 이미 {sector} 섹터이므로 "{sector}"를 태그로 쓰지 마십시오.
         같은 종목이 여러 날 반복돼도 태그 표기는 항상 똑같이 써야 나중에 검색됩니다.
-- headline : 태그에 이미 나온 회사명은 반복하지 않습니다. 명사형으로 끝냅니다 —
-        "수주", "체결", "시행", "정지", "착수". "~했다", "~입니다", "~할 전망" 같은
-        서술형·존댓말은 쓰지 마십시오.
-- detail : headline에 없는 정보만 더합니다. 금액·일정·규모·파급 중 하나면 충분합니다.
-        headline을 바꿔 말하기만 하는 detail은 빈 문자열로 두십시오.
+- detail : 기사 제목에 **없는** 정보만 한 줄로 더합니다. 금액·일정·규모·파급 중
+        하나면 충분합니다. 제목을 바꿔 말하기만 할 거라면 빈 문자열로 두십시오.
+        명사형으로 끝냅니다. "~했다", "~입니다" 같은 서술형은 쓰지 마십시오.
+        제목이 영문인 기사는 detail을 한국어로 써서 핵심이 바로 읽히게 하십시오.
 
 [사실 원칙]
 - 후보 목록에 주어진 제목·요약에 있는 사실만 씁니다. 추측하거나 지어내지 마십시오.
@@ -680,15 +678,13 @@ def hashtag(word: str) -> str:
 
 
 def source_link(c: Cluster) -> str:
-    """'🔗 원문 보기 · 매체명 외 N곳' 하이퍼링크 한 줄.
+    """'🔗 원문 보기' 하이퍼링크 한 줄.
 
     긴 Google News URL은 앵커 뒤에 숨고 화면에는 이 문구만 보입니다.
-    몇 곳이 받아썼는지를 같이 적어, 업계가 얼마나 크게 다룬 건인지 드러냅니다.
+    매체명과 보도 매체 수는 화면에 싣지 않습니다 — 선별에는 쓰지만
+    읽을 때는 군더더기라서요.
     """
-    label = f"🔗 원문 보기 · {c.outlets[0]}"
-    if len(c.outlets) > 1:
-        label += f" 외 {len(c.outlets) - 1}곳"
-    return f'<a href="{esc_attr(c.lead.url)}">{esc(label)}</a>'
+    return f'<a href="{esc_attr(c.lead.url)}">🔗 원문 보기</a>'
 
 
 def render(curation: Curation | None, shortlist: list[Cluster], title: str, subtitle: str) -> list[str]:
@@ -697,16 +693,19 @@ def render(curation: Curation | None, shortlist: list[Cluster], title: str, subt
 
     if curation and curation.picks:
         for p in curation.picks:
+            c = shortlist[p.id - 1]
             tags = " ".join(f"#{hashtag(t)}" for t in p.tags[:3] if hashtag(t))
-            out.append(f"\n<b>{esc(tags)}</b>" if tags else "")
-            out.append(esc(p.headline))
+            if tags:
+                out.append(f"\n<b>{esc(tags)}</b>")
+            # 제목은 요약하지 않고 대표 기사 원문 제목을 그대로 씁니다.
+            out.append(esc(c.lead.title))
             if p.detail.strip():
                 out.append(esc(p.detail))
-            out.append(source_link(shortlist[p.id - 1]))
+            out.append(source_link(c))
     else:
         # AI 선별이 실패해도 빈손으로 보내지 않습니다.
         out.append("\n<i>(AI 선별 미실행 — 스코어 상위 기사)</i>")
-        for c in shortlist[:10]:
+        for c in shortlist[:8]:
             out.append(f"\n{esc(c.lead.title)}")
             out.append(source_link(c))
 
@@ -805,9 +804,7 @@ def main() -> int:
             continue
 
         curation = None if args.no_ai else curate(shortlist, cfg, sector, size, f"{start:%Y-%m-%d}")
-        picked_n = len(curation.picks) if curation else min(size, len(shortlist))
-        subtitle = f"{now:%Y.%m.%d} ({weekday}) | 후보 {len(shortlist)}건 → {picked_n}건"
-        chunks = render(curation, shortlist, d["title"], subtitle)
+        chunks = render(curation, shortlist, d["title"], f"{now:%Y.%m.%d} ({weekday})")
 
         if args.dry_run:
             print("\n" + "=" * 60)
