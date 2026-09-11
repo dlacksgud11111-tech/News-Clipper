@@ -43,7 +43,8 @@ AXES = ["수주·계약·실적", "정책·규제", "프로젝트·기술", "리
 # ─────────────────────────────────────────────────────────────
 @dataclass
 class Article:
-    title: str
+    title: str  # 화면에 나갈 제목 (매체명·코너명 말머리를 떼어낸 것)
+    raw_title: str  # 손대지 않은 원본. 차단어 검사는 반드시 이걸로 합니다.
     url: str
     outlet: str
     published: datetime
@@ -291,6 +292,7 @@ def parse_entry(entry: dict, lang: str, group: str, tz: timezone) -> Article | N
 
     return Article(
         title=clean_title(title, outlet),
+        raw_title=title,
         url=entry.get("link", ""),
         outlet=outlet,
         published=published,
@@ -451,7 +453,10 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
         blob = " ".join(f"{a.title} {a.snippet}" for a in c.articles).lower()
         # 차단어는 제목에서만 봅니다. 본문 요약에 우연히 섞인 단어로
         # 멀쩡한 기사가 탈락하는 것을 막기 위해서입니다.
-        titles = " ".join(a.title for a in c.articles).lower()
+        # 단 여기서는 정리 전 원본 제목을 씁니다 — "[애널리스트의 분석] ~"처럼
+        # 차단 근거가 코너명 말머리에 들어 있는 경우, 정리된 제목에는 그 단어가
+        # 이미 지워져 있어서 그냥 통과해 버립니다.
+        titles = " ".join(a.raw_title or a.title for a in c.articles).lower()
 
         # 주제어가 하나도 없으면 탈락 (수집 쿼리가 넓어서 잡히는 무관 기사 제거)
         if not any(w in blob for w in topic_words):
