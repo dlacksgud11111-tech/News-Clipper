@@ -61,6 +61,8 @@ class Cluster:
 
     articles: list[Article] = field(default_factory=list)
     score: float = 0.0
+    coverage: list[str] = field(default_factory=list)  # 제목에 등장한 커버리지 종목
+    sector: str = ""  # 원전 / 건설 / 유틸리티 / 전력기기
 
     @property
     def lead(self) -> Article:
@@ -82,6 +84,18 @@ class Cluster:
 _TAG_RE = re.compile(r"<[^>]+>")
 _BRACKET_RE = re.compile(r"[\[\(<【][^\]\)>】]{1,20}[\]\)>】]")
 _NONWORD_RE = re.compile(r"[^0-9A-Za-z가-힣]+")
+
+
+def env(name: str) -> str:
+    """환경변수를 읽고 앞뒤 공백·줄바꿈을 제거합니다.
+
+    키를 메모장이나 GitHub Secrets에 붙여넣을 때 끝에 줄바꿈이 딸려오는 일이
+    흔합니다. 그 상태로 HTTP 헤더를 만들면 헤더에 공백 문자를 넣을 수 없어
+    요청을 만들다가 터지는데, SDK는 이를 APIConnectionError("Connection error")로
+    감싸서 내보냅니다. 네트워크 장애처럼 보이지만 실제로는 키 모양 문제라
+    원인을 찾기가 매우 어렵습니다. 여기서 미리 털어냅니다.
+    """
+    return (os.environ.get(name) or "").strip()
 
 
 def strip_html(s: str) -> str:
@@ -226,6 +240,73 @@ def parse_entry(entry: dict, lang: str, group: str, tz: timezone) -> Article | N
     )
 
 
+def coverage_groups(cfg: dict) -> list[tuple[str, str, list[str]]]:
+    """커버리지 설정을 (섹터, 언어, 종목명들) 목록으로 폅니다."""
+    return [
+        (g["sector"], g["lang"], list(g.get("names") or []))
+        for g in (cfg.get("coverage") or [])
+    ]
+
+
+def coverage_sectors(cfg: dict) -> dict[str, str]:
+    """종목명 → 섹터. 섹터 판정에서 가장 강한 신호입니다."""
+    out: dict[str, str] = {}
+    for sector, _, names in coverage_groups(cfg):
+        for n in names:
+            out.setdefault(n.lower(), sector)
+    return out
+
+
+def infer_sector(cluster: Cluster, sector_words: dict[str, list[str]],
+                 cov_sector: dict[str, str]) -> str:
+    """기사를 네 섹터 중 하나로 배정합니다.
+
+    커버리지 종목명이 제목에 있으면 그 종목의 섹터를 강하게 밀어주고(5점),
+    섹터 키워드는 보조 신호로 씁니다(1점). 둘 다 없으면 빈 문자열이고,
+    그런 기사는 어느 발송에도 들어가지 않습니다.
+    """
+    titles = " ".join(a.title for a in cluster.articles).lower()
+    blob = f"{titles} {' '.join(a.snippet for a in cluster.articles)}".lower()
+
+    points = {s: 0.0 for s in sector_words}
+    for name, sector in cov_sector.items():
+        if name in titles and sector in points:
+            points[sector] += 5
+    for sector, words in sector_words.items():
+        points[sector] += sum(1 for w in words if w.lower() in blob)
+
+    best = max(points, key=lambda s: points[s])
+    return best if points[best] > 0 else ""
+
+
+def coverage_names(cfg: dict) -> list[str]:
+    """중복 없이 전체 커버리지 종목명. 스코어링에 씁니다."""
+    seen: list[str] = []
+    for _, _, names in coverage_groups(cfg):
+        for n in names:
+            if n not in seen:
+                seen.append(n)
+    return seen
+
+
+def coverage_queries(cfg: dict, window_days: int, batch: int = 6) -> list[tuple[str, str, str]]:
+    """커버리지 종목명으로 검색 쿼리를 자동 생성합니다.
+
+    이름을 하나씩 검색하면 소스가 60개를 넘어 느려지므로, OR로 묶어 batch개씩
+    한 쿼리에 담습니다. Google News는 쿼리가 너무 길면 결과가 부실해져서
+    6개 정도가 적당합니다.
+    """
+    jobs = []
+    for sector, lang, names in coverage_groups(cfg):
+        for i in range(0, len(names), batch):
+            chunk = names[i : i + batch]
+            terms = " OR ".join(f'"{n}"' if " " in n else n for n in chunk)
+            query = f"({terms}) when:{window_days}d"
+            label = f"커버리지-{sector}-{lang}-{i // batch + 1}"
+            jobs.append((google_news_url(query, lang), lang, label))
+    return jobs
+
+
 def collect(cfg: dict, tz: timezone, window_days: int) -> list[Article]:
     """설정에 적힌 모든 소스를 병렬로 긁어옵니다."""
     jobs: list[tuple[str, str, str]] = []  # (url, lang, group)
@@ -233,6 +314,8 @@ def collect(cfg: dict, tz: timezone, window_days: int) -> list[Article]:
     for q in cfg.get("queries") or []:
         query = q["q"].replace("{window}", f"when:{window_days}d")
         jobs.append((google_news_url(query, q["lang"]), q["lang"], q["name"]))
+
+    jobs += coverage_queries(cfg, window_days)
 
     for s in cfg.get("site_queries") or []:
         query = f"{s['q']} site:{s['site']} when:{window_days}d"
@@ -294,9 +377,14 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
     topic_words = [w.lower() for w in rules["topic"]["words"]]
     blocked = [w.lower() for w in cfg.get("blocklist") or []]
     bonus_per_outlet = cfg.get("cluster_bonus", 3)
+    covered = [n.lower() for n in coverage_names(cfg)]
+    coverage_weight = cfg.get("coverage_weight", 8)
+    sector_words = {s: list(w) for s, w in (cfg.get("sectors") or {}).items()}
+    cov_sector = coverage_sectors(cfg)
 
     scored: list[Cluster] = []
     dropped = 0
+    with_coverage = 0
     for c in clusters:
         blob = " ".join(f"{a.title} {a.snippet}" for a in c.articles).lower()
         # 차단어는 제목에서만 봅니다. 본문 요약에 우연히 섞인 단어로
@@ -320,6 +408,14 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
                 hits = min(hits, 3)  # 주제어 반복으로 점수가 튀는 것 방지
             score += hits * rule["weight"]
 
+        # 커버리지 종목이 제목에 있으면 1순위. 본문이 아니라 제목만 봅니다 —
+        # 본문에 스쳐 지나가듯 언급된 기사까지 끌어올리면 오히려 지저분해집니다.
+        hits = [n for n in covered if n in titles]
+        if hits:
+            c.coverage = hits[:3]
+            with_coverage += 1
+            score += min(len(hits), 2) * coverage_weight
+
         # 여러 매체가 동시에 다뤘다 = 업계가 중요하게 본다
         score += (len(c.outlets) - 1) * bonus_per_outlet
 
@@ -328,56 +424,71 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
         score += max(0.0, 4.0 - age_h / 6)
 
         c.score = score
+        c.sector = infer_sector(c, sector_words, cov_sector)
         scored.append(c)
 
     scored.sort(key=lambda c: c.score, reverse=True)
-    print(f"      차단어로 제외 {dropped}건 → 채점 대상 {len(scored)}건")
+    by_sector = {s: sum(1 for c in scored if c.sector == s) for s in sector_words}
+    unassigned = sum(1 for c in scored if not c.sector)
+    print(f"      차단어로 제외 {dropped}건 → 채점 대상 {len(scored)}건 (커버리지 {with_coverage}건)")
+    print("      섹터 배정: " + " / ".join(f"{s} {n}" for s, n in by_sector.items())
+          + f" / 미배정 {unassigned}")
     return scored
 
 
-def balance(scored: list[Cluster], size: int, redundancy: float, word_overlap: float) -> list[Cluster]:
-    """국내/해외 균형을 맞춰 숏리스트를 구성합니다.
+class Picker:
+    """같은 사건을 두 번 뽑지 않도록 걸러주는 선별기.
 
     클러스터링은 제목이 꽤 비슷해야 묶이므로, 같은 사건을 크게 다르게 쓴
-    기사들이 숏리스트 자리를 여러 개 차지할 수 있습니다. 여기서는 이미 뽑은
-    기사와 조금이라도 겹치면 건너뛰어(느슨한 임계값) 주제 다양성을 확보합니다.
+    기사들이 자리를 여러 개 차지할 수 있습니다. 이미 뽑은 것과 조금이라도
+    겹치면(느슨한 임계값) 건너뛰어 주제 다양성을 확보합니다.
     """
-    picked: list[Cluster] = []
-    sigs: list[tuple[set[str], list[str]]] = []
-    chosen: set[int] = set()
 
-    def take(c: Cluster) -> bool:
-        if id(c) in chosen:
+    def __init__(self, redundancy: float, word_overlap: float):
+        self.redundancy = redundancy
+        self.word_overlap = word_overlap
+        self.picked: list[Cluster] = []
+        self._sigs: list[tuple[set[str], list[str]]] = []
+        self._ids: set[int] = set()
+
+    def take(self, c: Cluster) -> bool:
+        if id(c) in self._ids:
             return False
         sig, toks = bigrams(c.lead.key), content_tokens(c.lead.title)
-        for other_sig, other_toks in sigs:
-            if same_story(sig, other_sig, redundancy):
+        for other_sig, other_toks in self._sigs:
+            if same_story(sig, other_sig, self.redundancy):
                 return False
-            if topic_overlap(toks, other_toks) >= word_overlap:
+            if topic_overlap(toks, other_toks) >= self.word_overlap:
                 return False
-        picked.append(c)
-        sigs.append((sig, toks))
-        chosen.add(id(c))
+        self.picked.append(c)
+        self._sigs.append((sig, toks))
+        self._ids.add(id(c))
         return True
 
-    half = size // 2
-    for lang, quota in (("ko", half), ("en", size - half)):
+
+def shortlist_for(sector: str, pool: int, scored: list[Cluster], cfg: dict) -> list[Cluster]:
+    """한 섹터의 후보를 뽑습니다. 국내/해외 비율도 여기서 맞춥니다."""
+    picker = Picker(cfg["shortlist_dedup_threshold"], cfg["shortlist_word_overlap"])
+    mine = [c for c in scored if c.sector == sector]
+
+    # 해외 쿼리는 범위가 넓어 커버리지와 무관한 기사가 많이 걸립니다.
+    # 반반으로 두면 저품질 외신이 자리를 절반이나 차지하므로 국내에 더 줍니다.
+    ko_quota = round(pool * cfg["shortlist_ko_ratio"])
+    for lang, quota in (("ko", ko_quota), ("en", pool - ko_quota)):
         taken = 0
-        for c in scored:
+        for c in mine:
             if taken >= quota:
                 break
-            if c.lead.lang == lang and take(c):
+            if c.lead.lang == lang and picker.take(c):
                 taken += 1
 
-    for c in scored:  # 한쪽이 모자라면 남은 자리를 채웁니다
-        if len(picked) >= size:
+    for c in mine:  # 한쪽이 모자라면 남은 자리를 채웁니다
+        if len(picker.picked) >= pool:
             break
-        take(c)
+        picker.take(c)
 
-    picked.sort(key=lambda c: c.score, reverse=True)
-    ko_n = sum(1 for c in picked if c.lead.lang == "ko")
-    print(f"[3/5] 숏리스트 {len(picked)}건 (국내 {ko_n} / 해외 {len(picked) - ko_n})")
-    return picked
+    picker.picked.sort(key=lambda c: c.score, reverse=True)
+    return picker.picked
 
 
 # ─────────────────────────────────────────────────────────────
@@ -385,17 +496,14 @@ def balance(scored: list[Cluster], size: int, redundancy: float, word_overlap: f
 # ─────────────────────────────────────────────────────────────
 class Pick(BaseModel):
     id: int = Field(description="후보 목록에 붙은 번호")
-    block: Literal["원전", "건설·플랜트", "해외", "리스크"] = Field(
-        description="묶음. 국내 원전/원자력=원전, 국내 건설·플랜트·정비사업=건설·플랜트, "
-        "해외에서 벌어진 일=해외, 사고·중단·부실·소송·규제리스크=리스크"
-    )
-    tag: str = Field(
-        description="줄 맨 앞에 붙는 태그. 기업 뉴스면 종목명(한수원, 삼성E&A, 현대건설), "
-        "아니면 테마(정책, 규제, 전력망, 기자재). 공백 없이 8자 이내."
+    tags: list[str] = Field(
+        description="해시태그 2~3개. 첫 번째는 주체(종목명 또는 정부부처), "
+        "나머지는 사건의 핵심어. 각 태그는 공백·특수문자 없이 붙여 쓴 한 단어, 12자 이내. "
+        "# 기호는 붙이지 마십시오."
     )
     headline: str = Field(
-        description="핵심 사실 한 줄. 명사형으로 끝냅니다(수주/체결/시행/정지). "
-        "존댓말·서술형 금지. 35자 이내."
+        description="핵심 사실 한 줄. 주체(기업·정부)를 문장 안에 포함시킵니다. "
+        "명사형으로 끝냅니다(수주/체결/시행/정지). 존댓말·서술형 금지. 45자 이내."
     )
     detail: str = Field(
         description="headline에 없는 정보를 더하는 부연. 금액·일정·규모·의미 중 하나. "
@@ -408,14 +516,19 @@ class Curation(BaseModel):
 
 
 SYSTEM = """\
-당신은 원전·건설 섹터를 담당하는 증권사 애널리스트의 리서치 어시스턴트입니다.
-전날 나온 뉴스 후보 목록을 받아, 오늘 아침 애널리스트가 반드시 알아야 할 것만 골라냅니다.
+당신은 증권사 리서치 어시스턴트입니다. 지금 만드는 것은 **{sector}** 섹터의
+데일리 뉴스 한 장입니다. 받는 사람은 이 섹터를 담당하는 애널리스트입니다.
 
-[중요도 판단 기준] — 아래 4개 축에 걸리는 뉴스를 우선합니다.
-  1. 수주·계약·실적 : 계약 체결, 수주 공시, 실적 발표, 수주잔고 변동
-  2. 정책·규제      : 정부 정책, 법·제도 변경, 인허가, 예산 배정
-  3. 프로젝트·기술  : 개별 프로젝트의 단계 진척, 착공·준공, 기술 실증·인증
-  4. 리스크·사고    : 공사 중단, 사고, 부실, 소송, 제재
+전날 나온 {sector} 후보 목록에서, 오늘 아침 반드시 알아야 할 것만 골라냅니다.
+
+[중요도 우선순위] — 위에서부터 우선합니다.
+  1순위. 커버리지 종목의 실적·수주·공시에 직접 영향을 주는 뉴스
+         (계약 체결, 수주 공시, 실적 발표, 수주잔고, 대규모 투자 결정)
+  2순위. 섹터 전체의 수요·가격·정책이 바뀌는 뉴스
+         (전기·가스 요금, 원전 정책과 인허가, 건설 규제, 변압기 업황, 연료비)
+  3순위. 경쟁사·전방산업 동향 (해외 포함)
+         (Westinghouse·EDF 수주, GE Vernova 실적, 미국 데이터센터 증설)
+  제외.  주가 시황·특징주, 홍보성 기사, 단순 행사 소식
 
 [선별 원칙]
 - ★ 중복 제거가 최우선입니다. 후보 목록에는 같은 사건을 다룬 기사가 국문·영문으로
@@ -430,15 +543,27 @@ SYSTEM = """\
   스포츠 후원·기부·견학 같은 홍보성 사회공헌 기사, 단순 행사 개최 소식
 - 중요한 뉴스가 부족하면 요청 개수보다 적게 골라도 됩니다
 
-[작성 형식] — 최종 결과물은 아래처럼 한 줄로 렌더링됩니다.
-    · 삼성E&A: 사우디 비료 EPC 35억달러 수주 — 약 4.7조원, 올해 해외 수주 최대
-      └tag┘  └──── headline ────┘   └──── detail ────┘
+[작성 형식] — 최종 결과물은 아래처럼 렌더링됩니다.
 
-- tag : 기업 뉴스면 종목명을 그대로 씁니다(한수원, 삼성E&A, 두산에너빌리티).
-        기업이 주어가 아니면 테마를 씁니다(정책, 규제, 전력망, 기자재, 대미투자).
-- headline : 명사형으로 끝냅니다. "수주", "체결", "시행", "정지", "착수".
-        "~했다", "~입니다", "~할 전망" 같은 서술형·존댓말은 쓰지 마십시오.
-        tag에 이미 나온 회사명을 headline에서 반복하지 마십시오.
+    #삼성EA #사우디 #비료플랜트
+    사우디 비료 프로젝트 EPC 수주
+    35억달러(약 4조7000억원), 올해 해외 수주 최대
+    🔗 원문 보기 · 뉴시스 외 9곳
+
+    #SMR #특별법 #상용화
+    SMR 특별법·시행령 11일 시행
+    2027년 민관 합동 상세설계 착수
+    🔗 원문 보기 · 뉴스웍스 외 3곳
+
+- tags : 2~3개. 첫 번째는 주체(종목명·정부부처), 나머지는 사건의 핵심어입니다.
+        각 태그는 붙여 쓴 한 단어여야 합니다 — 공백·점·괄호·& 를 넣지 마십시오.
+        "삼성E&A"는 "삼성EA", "LS전선"은 그대로, "AI 데이터센터"는 "AI데이터센터".
+        # 기호는 붙이지 마십시오. 렌더링할 때 자동으로 붙습니다.
+        이 메시지 전체가 이미 {sector} 섹터이므로 "{sector}"를 태그로 쓰지 마십시오.
+        같은 종목이 여러 날 반복돼도 태그 표기는 항상 똑같이 써야 나중에 검색됩니다.
+- headline : 태그에 이미 나온 회사명은 반복하지 않습니다. 명사형으로 끝냅니다 —
+        "수주", "체결", "시행", "정지", "착수". "~했다", "~입니다", "~할 전망" 같은
+        서술형·존댓말은 쓰지 마십시오.
 - detail : headline에 없는 정보만 더합니다. 금액·일정·규모·파급 중 하나면 충분합니다.
         headline을 바꿔 말하기만 하는 detail은 빈 문자열로 두십시오.
 
@@ -448,18 +573,19 @@ SYSTEM = """\
   병기하고, 하나만 있으면 임의로 환산하지 마십시오.
 - 정보가 제목뿐이라 불충분하면 detail을 비우십시오. 채우려고 지어내면 안 됩니다.
 
-[블록 배정]
-- 원전        : 국내 원전·원자력 산업, 정책, 기업, 기술
-- 건설·플랜트 : 국내 건설사 수주, 정비사업, 플랜트, 건설 시장
-- 해외        : 해외에서 벌어진 일 (국내 기업의 해외 수주는 '건설·플랜트' 또는 '원전')
-- 리스크      : 사고, 공사 중단, 부실, 소송, 제재, 인허가 지연
+[섹터 적합성]
+후보 목록은 기계적으로 걸러낸 것이라 {sector}와 거리가 먼 기사가 섞여 있습니다.
+{sector} 담당자가 볼 이유가 없는 기사는 점수가 높아도 빼십시오.
+반대로 다른 섹터 담당자에게 더 어울리는 기사도 빼십시오 — 그쪽은 별도로 발송됩니다.
 """
 
 
-def curate(shortlist: list[Cluster], cfg: dict, target_date: str) -> Curation | None:
+def curate(shortlist: list[Cluster], cfg: dict, sector: str, size: int,
+           target_date: str) -> Curation | None:
     import anthropic
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    api_key = env("ANTHROPIC_API_KEY")
+    if not api_key:
         print("  ! ANTHROPIC_API_KEY 없음 — AI 선별을 건너뜁니다.", file=sys.stderr)
         return None
 
@@ -467,27 +593,44 @@ def curate(shortlist: list[Cluster], cfg: dict, target_date: str) -> Curation | 
     for i, c in enumerate(shortlist, 1):
         a = c.lead
         outlets = ", ".join(c.outlets[:4])
+        # 제목에서 찾은 커버리지 종목을 붙여주면 1순위 판단이 훨씬 정확해집니다.
+        mark = f"  ★커버리지: {', '.join(c.coverage)}" if c.coverage else ""
         lines.append(
-            f"[{i}] ({'국내' if a.lang == 'ko' else '해외'}) {a.title}\n"
+            f"[{i}] ({'국내' if a.lang == 'ko' else '해외'}) {a.title}{mark}\n"
             f"    매체: {outlets}{' 외' if len(c.outlets) > 4 else ''} "
             f"({len(c.outlets)}곳 보도) | {a.published:%m/%d %H:%M}\n"
             f"    요약: {a.snippet[:180] or '(없음)'}"
         )
     candidates = "\n".join(lines)
 
+    # 커버리지 목록을 시스템 프롬프트에 붙여 1순위 기준을 구체적으로 알려줍니다.
+    # 담당 섹터를 먼저 보여주고, 다른 섹터는 참고용으로 뒤에 둡니다.
+    groups = [(s, lg, n) for s, lg, n in coverage_groups(cfg) if n]
+    mine = [g for g in groups if g[0] == sector]
+    others = [g for g in groups if g[0] != sector]
+    roster = "\n".join(
+        f"  {s} ({'국내' if lg == 'ko' else '해외'}) : {', '.join(n)}" for s, lg, n in mine + others
+    )
+    system = SYSTEM.format(sector=sector) + (
+        f"\n[커버리지 종목] — 1순위 판단의 기준입니다. 맨 위가 이번 담당 섹터입니다.\n{roster}\n\n"
+        "후보 목록에서 ★커버리지 표시가 붙은 항목은 담당 종목이 제목에 등장한다는 뜻입니다.\n"
+        "같은 값이면 표시가 붙은 쪽을 우선하되, 표시가 붙었다고 중요하지 않은 기사까지\n"
+        "억지로 올리지는 마십시오. 표시가 없어도 섹터 전체를 흔드는 뉴스면 당연히 고릅니다.\n"
+    )
+
     user = (
-        f"{target_date} 자 원전·건설 뉴스 후보 {len(shortlist)}건입니다.\n"
-        f"이 중 가장 중요한 {cfg['final_size']}건 이내를 골라 주십시오.\n\n"
+        f"{target_date} 자 {sector} 뉴스 후보 {len(shortlist)}건입니다.\n"
+        f"이 중 가장 중요한 {size}건 이내를 골라 주십시오.\n\n"
         f"{candidates}"
     )
 
-    print(f"[4/5] Claude 중요도 판단 ({cfg['model']})")
-    client = anthropic.Anthropic()
+    print(f"  · {sector}: 후보 {len(shortlist)}건 → Claude 판단 중")
+    client = anthropic.Anthropic(api_key=api_key)
     try:
         response = client.messages.parse(
             model=cfg["model"],
             max_tokens=16000,
-            system=SYSTEM,
+            system=system,
             messages=[{"role": "user", "content": user}],
             output_format=Curation,
         )
@@ -496,10 +639,16 @@ def curate(shortlist: list[Cluster], cfg: dict, target_date: str) -> Curation | 
         return None
 
     result = response.parsed_output
-    # 모델이 범위 밖 번호를 주는 경우를 대비해 걸러냅니다.
-    result.picks = [p for p in result.picks if 1 <= p.id <= len(shortlist)]
+    # 모델이 범위 밖 번호를 주거나 같은 기사를 두 번 고르는 경우를 대비합니다.
+    seen: set[int] = set()
+    clean = []
+    for p in result.picks:
+        if 1 <= p.id <= len(shortlist) and p.id not in seen:
+            seen.add(p.id)
+            clean.append(p)
+    result.picks = clean[:size]
     u = response.usage
-    print(f"      선별 {len(result.picks)}건 | 토큰 in {u.input_tokens} / out {u.output_tokens}")
+    print(f"    선별 {len(result.picks)}건 | 토큰 in {u.input_tokens} / out {u.output_tokens}")
     return result
 
 
@@ -516,16 +665,27 @@ def esc_attr(s: str) -> str:
     return html.escape(s or "", quote=True)
 
 
-BLOCK_ORDER = ["원전", "건설·플랜트", "해외", "리스크"]
+_TAG_STRIP_RE = re.compile(r"[^0-9A-Za-z가-힣]")
+
+
+def hashtag(word: str) -> str:
+    """해시태그로 쓸 수 있게 다듬습니다.
+
+    텔레그램 해시태그는 공백·점·괄호가 들어가면 거기서 끊깁니다.
+    "삼성E&A" → "삼성EA", "HD현대일렉트릭" → 그대로.
+    숫자로만 이뤄진 태그는 텔레그램이 태그로 인식하지 않아 버립니다.
+    """
+    w = _TAG_STRIP_RE.sub("", word or "")
+    return "" if not w or w.isdigit() else w[:20]
 
 
 def source_link(c: Cluster) -> str:
-    """'원문보기 · 매체명 외 N곳' 형태의 하이퍼링크 한 줄.
+    """'🔗 원문 보기 · 매체명 외 N곳' 하이퍼링크 한 줄.
 
-    긴 Google News URL을 그대로 노출하지 않으면서, 어느 매체 기사인지와
-    몇 곳이 받아썼는지를 같이 보여줍니다.
+    긴 Google News URL은 앵커 뒤에 숨고 화면에는 이 문구만 보입니다.
+    몇 곳이 받아썼는지를 같이 적어, 업계가 얼마나 크게 다룬 건인지 드러냅니다.
     """
-    label = f"원문보기 · {c.outlets[0]}"
+    label = f"🔗 원문 보기 · {c.outlets[0]}"
     if len(c.outlets) > 1:
         label += f" 외 {len(c.outlets) - 1}곳"
     return f'<a href="{esc_attr(c.lead.url)}">{esc(label)}</a>'
@@ -536,21 +696,19 @@ def render(curation: Curation | None, shortlist: list[Cluster], title: str, subt
     out = [f"<b>■ {esc(title)}</b>", f"<i>{esc(subtitle)}</i>"]
 
     if curation and curation.picks:
-        for block in BLOCK_ORDER:
-            group = [p for p in curation.picks if p.block == block]
-            if not group:
-                continue
-            out.append(f"\n<b>──── {esc(block)} ────</b>")
-            for p in group:
-                line = f"· <b>{esc(p.tag)}</b>: {esc(p.headline)}"
-                if p.detail.strip():
-                    line += f" — {esc(p.detail)}"
-                out.append(f"{line}\n  {source_link(shortlist[p.id - 1])}")
+        for p in curation.picks:
+            tags = " ".join(f"#{hashtag(t)}" for t in p.tags[:3] if hashtag(t))
+            out.append(f"\n<b>{esc(tags)}</b>" if tags else "")
+            out.append(esc(p.headline))
+            if p.detail.strip():
+                out.append(esc(p.detail))
+            out.append(source_link(shortlist[p.id - 1]))
     else:
         # AI 선별이 실패해도 빈손으로 보내지 않습니다.
         out.append("\n<i>(AI 선별 미실행 — 스코어 상위 기사)</i>")
         for c in shortlist[:10]:
-            out.append(f"· {esc(c.lead.title)}\n  {source_link(c)}")
+            out.append(f"\n{esc(c.lead.title)}")
+            out.append(source_link(c))
 
     return split_message("\n".join(out))
 
@@ -571,14 +729,21 @@ def split_message(text: str, limit: int = 3900) -> list[str]:
     return chunks
 
 
-def send_telegram(chunks: list[str]) -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+def send_telegram(chunks: list[str], chat_id_env: str = "") -> bool:
+    """한 섹터의 메시지를 보냅니다.
+
+    chat_id_env 로 섹터 전용 채널을 지정할 수 있고, 그 값이 없으면
+    공용 TELEGRAM_CHAT_ID 로 보냅니다. 채널을 아직 안 만들었어도
+    전부 한 곳으로 떨어지게 하기 위한 장치입니다.
+    """
+    token = env("TELEGRAM_BOT_TOKEN")
+    chat_id = env(chat_id_env) if chat_id_env else ""
+    if not chat_id:
+        chat_id = env("TELEGRAM_CHAT_ID")
     if not token or not chat_id:
         print("  ! TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID 없음 — 전송 생략", file=sys.stderr)
-        return
+        return False
 
-    print(f"[5/5] 텔레그램 전송 ({len(chunks)}개 메시지)")
     for i, chunk in enumerate(chunks, 1):
         r = requests.post(
             f"https://api.telegram.org/bot{token}/sendMessage",
@@ -593,7 +758,7 @@ def send_telegram(chunks: list[str]) -> None:
         if not r.ok:
             print(f"  ! 전송 실패 ({i}/{len(chunks)}): {r.status_code} {r.text[:200]}", file=sys.stderr)
             r.raise_for_status()
-    print("      완료")
+    return True
 
 
 # ─────────────────────────────────────────────────────────────
@@ -602,6 +767,7 @@ def main() -> int:
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--dry-run", action="store_true", help="텔레그램 전송 없이 콘솔 출력")
     ap.add_argument("--no-ai", action="store_true", help="Claude 선별 없이 스코어링 결과만")
+    ap.add_argument("--sector", default="", help="한 섹터만 실행 (예: 원전). 테스트용")
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
@@ -621,30 +787,40 @@ def main() -> int:
 
     clusters = cluster_articles(articles, cfg["dedup_threshold"])
     scored = score_clusters(clusters, cfg, now)
-    shortlist = balance(
-        scored,
-        cfg["shortlist_size"],
-        cfg["shortlist_dedup_threshold"],
-        cfg["shortlist_word_overlap"],
-    )
 
-    curation = None if args.no_ai else curate(shortlist, cfg, f"{start:%Y-%m-%d}")
+    digests = [d for d in (cfg.get("digests") or []) if not args.sector or d["sector"] == args.sector]
+    if not digests:
+        print(f"보낼 섹터가 없습니다 (--sector {args.sector}).", file=sys.stderr)
+        return 1
 
     weekday = "월화수목금토일"[now.weekday()]
-    picked_n = len(curation.picks) if curation else min(10, len(shortlist))
-    subtitle = f"{now:%Y.%m.%d} ({weekday}) | 후보 {len(shortlist)}건 → {picked_n}건"
-    chunks = render(curation, shortlist, cfg["title"], subtitle)
+    print(f"[4/5] 섹터별 선별 ({len(digests)}개)")
 
-    if args.dry_run:
-        print("\n" + "=" * 60)
-        print(html.unescape(re.sub(r"<[^>]+>", "", "\n\n".join(chunks))))
-        print("=" * 60)
-        print("\n--- 숏리스트 전체 ---")
-        for i, c in enumerate(shortlist, 1):
-            print(f"{i:2d}. [{c.score:5.1f}] ({len(c.outlets)}곳) {c.lead.title[:70]}")
-    else:
-        send_telegram(chunks)
+    sent = 0
+    for d in digests:
+        sector, size = d["sector"], d["size"]
+        shortlist = shortlist_for(sector, d["pool"], scored, cfg)
+        if not shortlist:
+            print(f"  · {sector}: 후보 없음 — 건너뜁니다")
+            continue
 
+        curation = None if args.no_ai else curate(shortlist, cfg, sector, size, f"{start:%Y-%m-%d}")
+        picked_n = len(curation.picks) if curation else min(size, len(shortlist))
+        subtitle = f"{now:%Y.%m.%d} ({weekday}) | 후보 {len(shortlist)}건 → {picked_n}건"
+        chunks = render(curation, shortlist, d["title"], subtitle)
+
+        if args.dry_run:
+            print("\n" + "=" * 60)
+            print(html.unescape(re.sub(r"<[^>]+>", "", "\n\n".join(chunks))))
+            print("=" * 60)
+            for i, c in enumerate(shortlist, 1):
+                star = "★" if c.coverage else " "
+                print(f"  {star}{i:2d}. [{c.score:5.1f}] ({len(c.outlets)}곳) {c.lead.title[:64]}")
+        elif send_telegram(chunks, d.get("chat_id_env", "")):
+            sent += 1
+
+    if not args.dry_run:
+        print(f"[5/5] 텔레그램 전송 완료 — {sent}/{len(digests)}개 섹터")
     return 0
 
 
