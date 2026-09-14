@@ -1,22 +1,53 @@
 name: 원전·건설 데일리 클리핑
 
-# GitHub schedule 은 도착 시각을 보장하지 않습니다(실측 96~106분 지연, 건너뛰기도 함).
-# 그래서 새벽부터 20분 간격으로 여러 번 예약해두고, 06:45 이후 도착한
-# 첫 실행만 발송합니다. 나머지는 20초 만에 종료합니다.
+# ─────────────────────────────────────────────────────────────
+#  왜 "기다렸다가" 보내는가  (2026-09-15 개편)
+#
+#  GitHub의 schedule(cron)은 두 가지가 모두 보장되지 않습니다.
+#
+#    (1) 언제 도착할지  — 실측 지연 5분 ~ 105분. 날마다 다릅니다.
+#    (2) 도착하기는 하는지 — 9/15에는 예약 13칸 중 단 1칸만 실행됐습니다.
+#        (03:01~07:01 사이 12칸이 예약돼 있었는데 06:26 한 건만 실행)
+#
+#  예전 방식은 "06:45 전에 도착한 실행은 건너뛰고, 다음 예약이 하겠지"
+#  였습니다. 그런데 그 '다음 예약'이 아예 오지 않는 날이 있습니다.
+#  9/15가 그랬고, 그래서 그날은 한 통도 가지 않았습니다.
+#
+#  그래서 건너뛰지 않고 **붙잡아 둡니다**. 몇 시에 도착하든 그 실행이
+#  목표 시각까지 잠들어 있다가 깨어나서 보냅니다. 하루에 예약이 단 한 번만
+#  실행돼도 정시에 도착합니다.
+#
+#    04:12에 도착 → 07:00까지 대기 → 07:00 발송
+#    06:50에 도착 → 07:00까지 대기 → 07:00 발송
+#    07:20에 도착 → 이미 지났으므로 즉시 발송
+#
+#  수집은 깨어난 뒤에 하므로 기사 시간창도 발송 시각 기준으로 잡힙니다.
+#  하루 한 번만 나가도록 날짜별 캐시(sent-YYYY-MM-DD)로 잠급니다.
+# ─────────────────────────────────────────────────────────────
 on:
   schedule:
-    # UTC 18:00~23:59 = KST 03:00~08:59, 20분 간격
-    - cron: "1,21,41 18-23 * * *"
-  workflow_dispatch:
+    # UTC 21:07·21:37·22:07·22:37 = KST 06:07·06:37·07:07·07:37
+    #
+    # 앞의 두 칸이 정시 발송을 맡고, 뒤의 두 칸은 앞이 통째로 누락됐을 때를
+    # 받치는 예비입니다. 더 이른 새벽까지 그물을 넓히면 지연 100분짜리
+    # 날에도 정시를 지킬 수 있지만, 그만큼 대기 시간이 길어져 무료 한도
+    # (비공개 저장소 월 2,000분)를 넘습니다. 저장소를 공개로 바꾸면 사용
+    # 시간이 무제한이 되므로 그때 19-22시(KST 04~07시)로 넓히면 됩니다.
+    - cron: "7,37 21-22 * * *"
+  workflow_dispatch: # 수동 실행은 대기 없이 즉시 발송합니다.
 
 concurrency:
   group: daily-clipping
   cancel-in-progress: false
 
+env:
+  SEND_AT: "07:00" # 목표 발송 시각 (KST)
+  MAX_WAIT_MIN: "180" # 대기 상한. 작업 최대 6시간 제한과 요금을 함께 고려한 값.
+
 jobs:
   clip:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 200 # MAX_WAIT_MIN + 수집·선별·전송 여유분
 
     steps:
       - name: 오늘 날짜 (KST)
@@ -32,7 +63,7 @@ jobs:
 
       - name: 이미 보냈으면 여기서 끝
         if: steps.guard.outputs.cache-hit == 'true'
-        run: echo "오늘 이미 발송했습니다."
+        run: echo "오늘(${{ steps.day.outputs.today }}) 이미 발송했습니다. 종료합니다."
 
       - uses: actions/checkout@v4
         if: steps.guard.outputs.cache-hit != 'true'
@@ -46,18 +77,49 @@ jobs:
       - run: pip install -r requirements.txt
         if: steps.guard.outputs.cache-hit != 'true'
 
-      - name: 뉴스 수집·선별·전송
+      # 예약 실행은 몇 시에 도착하든 목표 시각까지 여기서 잠듭니다.
+      # 수동 실행(workflow_dispatch)은 누른 즉시 보내야 하므로 건너뜁니다.
+      - name: 목표 시각까지 대기
+        if: steps.guard.outputs.cache-hit != 'true' && github.event_name == 'schedule'
+        run: |
+          now=$(date +%s)
+          target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
+          wait=$(( target - now ))
+          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M') KST / 목표 ${SEND_AT} KST"
+          if [ "$wait" -le 0 ]; then
+            echo "이미 목표 시각을 지났습니다 ($(( -wait / 60 ))분 경과). 바로 진행합니다."
+            exit 0
+          fi
+          cap=$(( MAX_WAIT_MIN * 60 ))
+          if [ "$wait" -gt "$cap" ]; then
+            echo "대기 시간이 상한(${MAX_WAIT_MIN}분)을 넘어 상한까지만 기다립니다."
+            wait=$cap
+          fi
+          echo "$(( wait / 60 ))분 $(( wait % 60 ))초 대기합니다."
+          sleep "$wait"
+          echo "깨어남: $(TZ=Asia/Seoul date +'%m/%d %H:%M:%S') KST"
+
+      # 자는 동안 다른 실행이 발송을 마쳤을 수도 있으므로 한 번 더 확인합니다.
+      - name: 대기 중에 누가 보냈는지 재확인
+        id: guard2
         if: steps.guard.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .sent-marker
+          key: sent-${{ steps.day.outputs.today }}
+
+      - name: 뉴스 수집·선별·전송
+        if: steps.guard.outputs.cache-hit != 'true' && steps.guard2.outputs.cache-hit != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python clipper.py --marker .sent-marker \
-            ${{ github.event_name == 'schedule' && '--not-before 06:45' || '' }}
+        run: python clipper.py --marker .sent-marker
 
+      # 실제로 보냈을 때만 표시가 생깁니다. 전송이 전부 실패한 실행은 표시를
+      # 남기지 않으므로, 뒤따르는 예약이 다시 시도하게 됩니다.
       - name: 발송했으면 오늘 표시 저장
-        if: steps.guard.outputs.cache-hit != 'true' && hashFiles('.sent-marker') != ''
+        if: steps.guard.outputs.cache-hit != 'true' && steps.guard2.outputs.cache-hit != 'true' && hashFiles('.sent-marker') != ''
         uses: actions/cache/save@v4
         with:
           path: .sent-marker
