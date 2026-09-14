@@ -909,6 +909,29 @@ def send_telegram(chunks: list[str], chat_id_env: str = "") -> bool:
 
 
 # ─────────────────────────────────────────────────────────────
+def wait_until(hhmm: str, tz: timezone) -> None:
+    """수집·선별을 마친 상태로 목표 시각까지 기다립니다.
+
+    GitHub 쪽 대기(워크플로의 sleep)는 '실행을 붙잡아 두는' 용도라 초 단위가
+    맞지 않습니다. 깨어난 뒤 수집·선별에 1~2분이 더 걸리기 때문입니다.
+    그래서 마지막 몇 분은 여기서 기다립니다. 보낼 메시지를 다 만들어 둔 채로
+    잠들었다가 깨어나자마자 전송하므로 도착 시각이 초 단위로 맞습니다.
+
+    준비가 목표 시각을 넘겨 끝났다면 기다리지 않고 바로 보냅니다.
+    """
+    if not hhmm:
+        return
+    hh, mm = (int(x) for x in hhmm.split(":"))
+    now = datetime.now(tz)
+    target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+    delay = (target - now).total_seconds()
+    if delay <= 0:
+        print(f"      목표 {hhmm}을 이미 지나 바로 보냅니다 (현재 {now:%H:%M:%S} KST).")
+        return
+    print(f"      준비 완료 ({now:%H:%M:%S} KST). {hhmm}:00 정각까지 {delay:.0f}초 대기합니다.")
+    time.sleep(delay)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="원전·건설 데일리 뉴스 클리핑")
     ap.add_argument("--config", default="config.yaml")
@@ -921,6 +944,13 @@ def main() -> int:
         metavar="HH:MM",
         help="이 시각(KST) 이전이면 아무것도 하지 않고 종료합니다. "
         "GitHub 예약이 늦게 도착해도 원하는 시각 이후에만 발송되게 하는 장치입니다.",
+    )
+    ap.add_argument(
+        "--send-at",
+        default="",
+        metavar="HH:MM",
+        help="수집·선별을 먼저 끝내고 이 시각(KST) 정각에 전송합니다. "
+        "도착 시각을 초 단위로 맞추기 위한 장치입니다.",
     )
     ap.add_argument(
         "--marker",
@@ -949,6 +979,15 @@ def main() -> int:
         if (now.hour, now.minute) < (hh, mm):
             print(f"아직 {args.not_before} 전입니다 (현재 {now:%H:%M} KST) — 이번 실행은 건너뜁니다.")
             return 0
+
+    # 형식 오류는 30초짜리 수집을 시작하기 전에 잡습니다.
+    if args.send_at:
+        try:
+            hh, mm = (int(x) for x in args.send_at.split(":"))
+            datetime.now(tz).replace(hour=hh, minute=mm)
+        except ValueError:
+            print(f"--send-at 형식이 잘못됐습니다: {args.send_at!r} (예: 07:00)", file=sys.stderr)
+            return 2
     start = now - timedelta(hours=cfg["window_hours"])
     # Google News의 when:Nd 는 일 단위라 넉넉히 잡고, 정확한 필터는 아래에서 합니다.
     window_days = max(1, (cfg["window_hours"] + 23) // 24)
@@ -970,7 +1009,10 @@ def main() -> int:
     weekday = "월화수목금토일"[now.weekday()]
     print(f"[4/5] 섹터별 선별 ({len(digests)}개)")
 
-    sent = 0
+    # 먼저 네 섹터를 전부 만들어 둡니다. 전송은 그 뒤에 한꺼번에 합니다.
+    # 만드는 데 1~2분이 걸리는데, 이걸 목표 시각 뒤로 미루면 도착이 그만큼
+    # 밀립니다. 준비를 앞당겨 놓아야 --send-at 으로 초 단위를 맞출 수 있습니다.
+    ready: list[tuple[list[str], str]] = []  # (메시지 조각, chat_id 환경변수명)
     for d in digests:
         sector, size = d["sector"], d["size"]
         shortlist = shortlist_for(sector, d["pool"], scored, cfg)
@@ -989,13 +1031,21 @@ def main() -> int:
             for i, c in enumerate(shortlist, 1):
                 star = "★" if c.coverage else " "
                 print(f"  {star}{i:2d}. [{c.score:5.1f}] ({len(c.outlets)}곳) {c.lead.title[:64]}")
-        elif send_telegram(chunks, d.get("chat_id_env", "")):
-            sent += 1
+        else:
+            ready.append((chunks, d.get("chat_id_env", "")))
 
     if args.dry_run:
         return 0
 
-    print(f"[5/5] 텔레그램 전송 완료 — {sent}/{len(digests)}개 섹터")
+    wait_until(args.send_at, tz)
+
+    sent = 0
+    for chunks, chat_id_env in ready:
+        if send_telegram(chunks, chat_id_env):
+            sent += 1
+
+    print(f"[5/5] 텔레그램 전송 완료 — {sent}/{len(digests)}개 섹터"
+          f" ({datetime.now(tz):%H:%M:%S} KST)")
 
     # 한 섹터라도 실제로 보냈을 때만 표시를 남깁니다. 전송이 전부 실패했는데
     # 표시를 남기면, 뒤따르는 예약 실행들이 "오늘은 이미 보냈다"고 판단해
