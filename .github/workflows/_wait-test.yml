@@ -1,0 +1,33 @@
+name: _대기 로직 테스트 (임시)
+
+# 본 워크플로의 '목표 시각까지 대기' 단계와 똑같은 코드를 격리해서 돌려봅니다.
+# 검증이 끝나면 이 파일은 지웁니다. 텔레그램 발송은 하지 않습니다.
+on:
+  workflow_dispatch:
+    inputs:
+      send_at:
+        description: "목표 시각 (KST, HH:MM)"
+        required: true
+        default: "07:00"
+
+jobs:
+  wait-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      SEND_AT: ${{ inputs.send_at }}
+    steps:
+      - name: 목표 시각까지 대기
+        run: |
+          now=$(date +%s)
+          target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
+          wait=$(( target - now ))
+          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M:%S') KST / 목표 ${SEND_AT} KST"
+          echo "target(epoch)=$target now(epoch)=$now wait=$wait"
+          if [ "$wait" -le 0 ]; then
+            echo "이미 목표 시각을 지났습니다 ($(( -wait / 60 ))분 경과). 바로 진행합니다."
+            exit 0
+          fi
+          echo "$(( wait / 60 ))분 $(( wait % 60 ))초 대기합니다."
+          sleep "$wait"
+          echo "깨어남: $(TZ=Asia/Seoul date +'%m/%d %H:%M:%S') KST"
