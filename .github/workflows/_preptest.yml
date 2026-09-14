@@ -1,0 +1,29 @@
+name: _준비시각 계산 테스트 (임시)
+on:
+  workflow_dispatch:
+env:
+  SEND_AT: "07:00"
+  PREP_MIN: "5"
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 준비 시작 시각 계산 (본 워크플로와 동일한 코드, sleep만 제거)
+        run: |
+          now=$(date +%s)
+          target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
+          prep=$(( target - PREP_MIN * 60 ))
+          wait=$(( prep - now ))
+          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M') KST"
+          echo "준비 시작 $(TZ=Asia/Seoul date -d "@$prep" +'%H:%M') / 발송 ${SEND_AT} KST"
+          echo "target=$target prep=$prep diff=$(( target - prep ))초 wait=${wait}초"
+          test $(( target - prep )) -eq 300 || { echo '앞당김이 300초가 아님'; exit 1; }
+          echo "확인: 준비 시작이 발송보다 정확히 5분 앞섬"
+      - name: 이벤트 분기 확인
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "예약 실행 → --send-at $SEND_AT 를 붙임"
+          else
+            echo "수동 실행 → --send-at 없이 즉시 발송 (지금 이 경로)"
+          fi
