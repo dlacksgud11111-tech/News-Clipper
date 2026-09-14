@@ -1,0 +1,29 @@
+name: _wait 입구 검증 (임시)
+on:
+  workflow_dispatch:
+    inputs:
+      wait:
+        description: "발송 시각까지 기다렸다 보내기 (끄면 즉시 발송)"
+        type: boolean
+        default: false
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: A. 대기 경로로 들어왔는지 (본 워크플로와 동일한 조건)
+        if: github.event_name == 'schedule' || inputs.wait
+        run: echo "대기 경로 진입 — 여기서 잠들었다가 07:00에 보냄"
+
+      - name: B. 어떤 명령이 실행되는지 (본 워크플로와 동일한 bash)
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.wait }}" = "true" ]; then
+            echo "명령: python clipper.py --marker .sent-marker --send-at 07:00"
+          else
+            echo "명령: python clipper.py --marker .sent-marker   (즉시 발송)"
+          fi
+
+      - name: C. 받은 값 그대로 출력
+        run: |
+          echo "event_name = ${{ github.event_name }}"
+          echo "inputs.wait = '${{ inputs.wait }}'"
