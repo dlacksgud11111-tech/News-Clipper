@@ -44,7 +44,21 @@ on:
     # 요금 문제가 없습니다. (비공개로 되돌리면 월 2,000분 한도가 생기니
     # 그때는 21-22시(KST 06~07시)로 좁혀야 합니다.)
     - cron: "7,27,47 17-22 * * *"
-  workflow_dispatch: # 수동 실행은 대기 없이 즉시 발송합니다.
+
+  # 바깥에서 깨우는 입구입니다.
+  #
+  #   Actions 탭의 'Run workflow' 버튼    → wait 체크 해제 → 즉시 발송
+  #   구글 앱스 스크립트가 API로 호출      → wait=true    → SEND_AT까지 기다렸다 발송
+  #
+  # GitHub 예약이 그날 한 칸도 실행되지 않아도, 바깥에서 새벽에 한 번만
+  # 깨워주면 정시 발송이 보장됩니다. 깨우는 시각은 07:00 전이기만 하면
+  # 정확할 필요가 없습니다 — 정각 맞추기는 아래 대기 장치가 합니다.
+  workflow_dispatch:
+    inputs:
+      wait:
+        description: "발송 시각까지 기다렸다 보내기 (끄면 즉시 발송)"
+        type: boolean
+        default: false
 
 concurrency:
   group: daily-clipping
@@ -92,10 +106,10 @@ jobs:
       - run: pip install -r requirements.txt
         if: steps.guard.outputs.cache-hit != 'true'
 
-      # 예약 실행은 몇 시에 도착하든 '준비 시작 시각'까지 여기서 잠듭니다.
-      # 수동 실행(workflow_dispatch)은 누른 즉시 보내야 하므로 건너뜁니다.
+      # 예약 실행과 'wait=true'로 깨워진 실행은 '준비 시작 시각'까지 잠듭니다.
+      # 버튼으로 누른 수동 실행은 즉시 보내야 하므로 건너뜁니다.
       - name: 준비 시작 시각까지 대기
-        if: steps.guard.outputs.cache-hit != 'true' && github.event_name == 'schedule'
+        if: steps.guard.outputs.cache-hit != 'true' && (github.event_name == 'schedule' || inputs.wait)
         run: |
           now=$(date +%s)
           target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
@@ -131,10 +145,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        # 예약 실행은 수집·선별을 먼저 끝내고 SEND_AT 정각에 전송합니다.
-        # 수동 실행은 누른 즉시 보내야 하므로 --send-at 을 붙이지 않습니다.
+        # 기다리는 경로는 수집·선별을 먼저 끝내고 SEND_AT 정각에 전송합니다.
+        # 버튼 수동 실행은 누른 즉시 보내야 하므로 --send-at 을 붙이지 않습니다.
         run: |
-          if [ "${{ github.event_name }}" = "schedule" ]; then
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.wait }}" = "true" ]; then
             python clipper.py --marker .sent-marker --send-at "$SEND_AT"
           else
             python clipper.py --marker .sent-marker
