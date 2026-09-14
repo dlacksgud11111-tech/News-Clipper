@@ -14,14 +14,20 @@ name: 원전·건설 데일리 클리핑
 #  9/15가 그랬고, 그래서 그날은 한 통도 가지 않았습니다.
 #
 #  그래서 건너뛰지 않고 **붙잡아 둡니다**. 몇 시에 도착하든 그 실행이
-#  목표 시각까지 잠들어 있다가 깨어나서 보냅니다. 하루에 예약이 단 한 번만
-#  실행돼도 정시에 도착합니다.
+#  잠들어 있다가 깨어나서 보냅니다. 하루에 예약이 단 한 번만 실행돼도
+#  정시에 도착합니다.
 #
-#    04:12에 도착 → 07:00까지 대기 → 07:00 발송
-#    06:50에 도착 → 07:00까지 대기 → 07:00 발송
-#    07:20에 도착 → 이미 지났으므로 즉시 발송
+#  대기는 두 번에 나눠서 합니다. 수집·선별에 1~2분이 걸리기 때문에
+#  07:00에 깨워서 그때부터 일을 시키면 도착은 07:01~07:02가 됩니다.
 #
-#  수집은 깨어난 뒤에 하므로 기사 시간창도 발송 시각 기준으로 잡힙니다.
+#    1단계 (여기, sleep)        06:55까지 재운다
+#    2단계 (clipper --send-at)  수집·선별을 끝내 놓고 07:00:00에 전송
+#
+#    04:12에 도착 → 06:55까지 대기 → 준비 → 07:00:00 발송
+#    06:58에 도착 → 대기 없음    → 준비 → 07:00:00 발송 (준비가 늦으면 즉시)
+#    07:20에 도착 → 대기 없음    → 준비 → 즉시 발송
+#
+#  기사 시간창은 준비를 시작한 시각(≈06:55) 기준입니다.
 #  하루 한 번만 나가도록 날짜별 캐시(sent-YYYY-MM-DD)로 잠급니다.
 # ─────────────────────────────────────────────────────────────
 on:
@@ -45,7 +51,10 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  SEND_AT: "07:00" # 목표 발송 시각 (KST)
+  SEND_AT: "07:00" # 목표 발송 시각 (KST). 이 시각에 초 단위로 도착합니다.
+  # 수집·선별을 몇 분 앞당겨 시작할지. 실측 소요는 1~2분이라 5분이면
+  # 넉넉합니다. 혹시 넘기더라도 준비가 끝나는 즉시 보냅니다.
+  PREP_MIN: "5"
   # 대기 상한. 가장 이른 칸(KST 02:07)에서 07:00까지가 293분이고,
   # GitHub의 작업 1건 최대 실행 시간이 6시간(360분)이라 그 안에 듭니다.
   MAX_WAIT_MIN: "300"
@@ -83,17 +92,19 @@ jobs:
       - run: pip install -r requirements.txt
         if: steps.guard.outputs.cache-hit != 'true'
 
-      # 예약 실행은 몇 시에 도착하든 목표 시각까지 여기서 잠듭니다.
+      # 예약 실행은 몇 시에 도착하든 '준비 시작 시각'까지 여기서 잠듭니다.
       # 수동 실행(workflow_dispatch)은 누른 즉시 보내야 하므로 건너뜁니다.
-      - name: 목표 시각까지 대기
+      - name: 준비 시작 시각까지 대기
         if: steps.guard.outputs.cache-hit != 'true' && github.event_name == 'schedule'
         run: |
           now=$(date +%s)
           target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
-          wait=$(( target - now ))
-          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M') KST / 목표 ${SEND_AT} KST"
+          prep=$(( target - PREP_MIN * 60 ))
+          wait=$(( prep - now ))
+          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M') KST"
+          echo "준비 시작 $(TZ=Asia/Seoul date -d "@$prep" +'%H:%M') / 발송 ${SEND_AT} KST"
           if [ "$wait" -le 0 ]; then
-            echo "이미 목표 시각을 지났습니다 ($(( -wait / 60 ))분 경과). 바로 진행합니다."
+            echo "이미 준비 시작 시각을 지났습니다 ($(( -wait / 60 ))분 경과). 바로 진행합니다."
             exit 0
           fi
           cap=$(( MAX_WAIT_MIN * 60 ))
@@ -120,7 +131,14 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python clipper.py --marker .sent-marker
+        # 예약 실행은 수집·선별을 먼저 끝내고 SEND_AT 정각에 전송합니다.
+        # 수동 실행은 누른 즉시 보내야 하므로 --send-at 을 붙이지 않습니다.
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            python clipper.py --marker .sent-marker --send-at "$SEND_AT"
+          else
+            python clipper.py --marker .sent-marker
+          fi
 
       # 실제로 보냈을 때만 표시가 생깁니다. 전송이 전부 실패한 실행은 표시를
       # 남기지 않으므로, 뒤따르는 예약이 다시 시도하게 됩니다.
