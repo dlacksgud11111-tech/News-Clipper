@@ -1,11 +1,12 @@
 name: 원전·건설 데일리 클리핑
 
-# 실행 시각은 여기서 정하지 않습니다.
-# GitHub의 schedule(cron)은 정시성을 보장하지 않아 매번 100분쯤 늦었습니다.
-# workflow_dispatch 는 호출 즉시 돌기 때문에, 외부 서비스(cron-job.org)가
-# 매일 06:45에 GitHub API로 이 워크플로를 호출합니다.
-# ※ schedule 을 다시 넣으면 하루 두 번 발송되니 주의하세요.
+# GitHub schedule 은 도착 시각을 보장하지 않습니다(실측 96~106분 지연, 건너뛰기도 함).
+# 그래서 새벽부터 20분 간격으로 여러 번 예약해두고, 06:45 이후 도착한
+# 첫 실행만 발송합니다. 나머지는 20초 만에 종료합니다.
 on:
+  schedule:
+    # UTC 18:00~23:59 = KST 03:00~08:59, 20분 간격
+    - cron: "1,21,41 18-23 * * *"
   workflow_dispatch:
 
 concurrency:
@@ -18,18 +19,46 @@ jobs:
     timeout-minutes: 15
 
     steps:
+      - name: 오늘 날짜 (KST)
+        id: day
+        run: echo "today=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: 오늘 이미 보냈는지 확인
+        id: guard
+        uses: actions/cache/restore@v4
+        with:
+          path: .sent-marker
+          key: sent-${{ steps.day.outputs.today }}
+
+      - name: 이미 보냈으면 여기서 끝
+        if: steps.guard.outputs.cache-hit == 'true'
+        run: echo "오늘 이미 발송했습니다."
+
       - uses: actions/checkout@v4
+        if: steps.guard.outputs.cache-hit != 'true'
 
       - uses: actions/setup-python@v5
+        if: steps.guard.outputs.cache-hit != 'true'
         with:
           python-version: "3.12"
           cache: pip
 
       - run: pip install -r requirements.txt
+        if: steps.guard.outputs.cache-hit != 'true'
 
       - name: 뉴스 수집·선별·전송
+        if: steps.guard.outputs.cache-hit != 'true'
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python clipper.py
+        run: |
+          python clipper.py --marker .sent-marker \
+            ${{ github.event_name == 'schedule' && '--not-before 06:45' || '' }}
+
+      - name: 발송했으면 오늘 표시 저장
+        if: steps.guard.outputs.cache-hit != 'true' && hashFiles('.sent-marker') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .sent-marker
+          key: sent-${{ steps.day.outputs.today }}
