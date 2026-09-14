@@ -323,19 +323,30 @@ def infer_sector(cluster: Cluster, sector_words: dict[str, list[str]],
                  cov_sector: dict[str, str]) -> str:
     """기사를 네 섹터 중 하나로 배정합니다.
 
-    커버리지 종목명이 제목에 있으면 그 종목의 섹터를 강하게 밀어주고(5점),
-    섹터 키워드는 보조 신호로 씁니다(1점). 둘 다 없으면 빈 문자열이고,
-    그런 기사는 어느 발송에도 들어가지 않습니다.
+    신호의 무게를 셋으로 나눕니다.
+      커버리지 종목명이 제목에  … 6점 — 가장 확실한 신호
+      섹터 키워드가 제목에      … 3점
+      섹터 키워드가 본문 요약에 … 1점 — 보조 신호일 뿐
+
+    제목과 본문을 같은 무게로 세면 엉뚱한 섹터로 갑니다. 실제로
+    "한전이 반도체 기업에 5년치 전기요금 선납을 요구하는 이유"가 본문 요약에
+    섞인 건설 관련 단어들 때문에 [건설]로 배정된 적이 있습니다.
+    제목이 곧 기사의 주제이므로 제목에 훨씬 큰 무게를 둡니다.
     """
     titles = " ".join(a.title for a in cluster.articles).lower()
-    blob = f"{titles} {' '.join(a.snippet for a in cluster.articles)}".lower()
+    snippets = " ".join(a.snippet for a in cluster.articles).lower()
 
     points = {s: 0.0 for s in sector_words}
     for name, sector in cov_sector.items():
         if name in titles and sector in points:
-            points[sector] += 5
+            points[sector] += 6
     for sector, words in sector_words.items():
-        points[sector] += sum(1 for w in words if w.lower() in blob)
+        for w in words:
+            w = w.lower()
+            if w in titles:
+                points[sector] += 3
+            elif w in snippets:
+                points[sector] += 1
 
     best = max(points, key=lambda s: points[s])
     return best if points[best] > 0 else ""
@@ -904,6 +915,20 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="텔레그램 전송 없이 콘솔 출력")
     ap.add_argument("--no-ai", action="store_true", help="Claude 선별 없이 스코어링 결과만")
     ap.add_argument("--sector", default="", help="한 섹터만 실행 (예: 원전). 테스트용")
+    ap.add_argument(
+        "--not-before",
+        default="",
+        metavar="HH:MM",
+        help="이 시각(KST) 이전이면 아무것도 하지 않고 종료합니다. "
+        "GitHub 예약이 늦게 도착해도 원하는 시각 이후에만 발송되게 하는 장치입니다.",
+    )
+    ap.add_argument(
+        "--marker",
+        default="",
+        metavar="PATH",
+        help="발송에 성공하면 이 경로에 표시 파일을 만듭니다. "
+        "워크플로가 이걸 보고 '오늘은 이미 보냈다'를 기억합니다.",
+    )
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
@@ -911,6 +936,19 @@ def main() -> int:
     # 실행 시각 기준으로 시간창을 계산합니다 (KST 고정).
     tz = timezone(timedelta(hours=9))
     now = datetime.now(tz)
+
+    # GitHub 예약은 도착 시각이 들쭉날쭉합니다(실측 96~106분 지연). 그래서
+    # 새벽부터 20분 간격으로 여러 번 예약해두고, 그중 원하는 시각 이후에
+    # 도착한 것만 실제로 발송하게 합니다. 이르게 도착한 실행은 여기서 끝납니다.
+    if args.not_before:
+        try:
+            hh, mm = (int(x) for x in args.not_before.split(":"))
+        except ValueError:
+            print(f"--not-before 형식이 잘못됐습니다: {args.not_before!r} (예: 06:45)", file=sys.stderr)
+            return 2
+        if (now.hour, now.minute) < (hh, mm):
+            print(f"아직 {args.not_before} 전입니다 (현재 {now:%H:%M} KST) — 이번 실행은 건너뜁니다.")
+            return 0
     start = now - timedelta(hours=cfg["window_hours"])
     # Google News의 when:Nd 는 일 단위라 넉넉히 잡고, 정확한 필터는 아래에서 합니다.
     window_days = max(1, (cfg["window_hours"] + 23) // 24)
@@ -954,8 +992,18 @@ def main() -> int:
         elif send_telegram(chunks, d.get("chat_id_env", "")):
             sent += 1
 
-    if not args.dry_run:
-        print(f"[5/5] 텔레그램 전송 완료 — {sent}/{len(digests)}개 섹터")
+    if args.dry_run:
+        return 0
+
+    print(f"[5/5] 텔레그램 전송 완료 — {sent}/{len(digests)}개 섹터")
+
+    # 한 섹터라도 실제로 보냈을 때만 표시를 남깁니다. 전송이 전부 실패했는데
+    # 표시를 남기면, 뒤따르는 예약 실행들이 "오늘은 이미 보냈다"고 판단해
+    # 그날 하루가 통째로 비게 됩니다.
+    if args.marker and sent:
+        with open(args.marker, "w", encoding="utf-8") as f:
+            f.write(f"{now.isoformat()} sent={sent}/{len(digests)}\n")
+        print(f"      발송 표시 남김: {args.marker}")
     return 0
 
 
