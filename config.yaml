@@ -179,7 +179,7 @@ shortlist_industry_ratio: 0.35
 shortlist_ko_ratio: 0.67
 
 # 최종 선별에 쓸 모델
-model: claude-opus-5
+model: claude-sonnet-5
 
 
 # ------------------------------------------------------------
