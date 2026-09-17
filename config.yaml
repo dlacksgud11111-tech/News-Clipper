@@ -24,29 +24,29 @@ digests:
   - sector: 원전
     emoji: ⚛️
     title: 원전 Daily News
-    size: 8
-    pool: 24
+    size: 10
+    pool: 30
     chat_id_env: TELEGRAM_CHAT_ID_NUCLEAR
 
   - sector: 건설
     emoji: 🏗️
     title: 건설 Daily News
-    size: 8
-    pool: 24
+    size: 10
+    pool: 30
     chat_id_env: TELEGRAM_CHAT_ID_CONSTRUCTION
 
   - sector: 유틸리티
     emoji: ⚡
     title: 유틸리티 Daily News
-    size: 8
-    pool: 24
+    size: 10
+    pool: 30
     chat_id_env: TELEGRAM_CHAT_ID_UTILITY
 
   - sector: 전력기기
     emoji: 🔌
     title: 전력기기 Daily News
-    size: 8
-    pool: 24
+    size: 10
+    pool: 30
     chat_id_env: TELEGRAM_CHAT_ID_EQUIPMENT
 
 
@@ -115,6 +115,24 @@ sectors:
     - utility
     - tariff
     - electricity demand
+    # 전력시장 제도 (2026-09-17 추가)
+    - 용량시장
+    - 전력수급기본계획
+    - 전기본
+    - 집단에너지
+    - 열병합
+    - 직접구매
+    - 전기사업법
+    - ferc
+    - caiso
+    - pjm
+    - ercot
+    - miso
+    - iso-ne
+    - interconnection
+    - capacity market
+    - rate case
+    - ppa
 
   전력기기:
     - 변압기
@@ -137,6 +155,15 @@ sectors:
     - grid
     - data center
     - fuel cell
+    # 2026-09-17 추가
+    - 계통 접속
+    - 접속 용량
+    - 송전선로
+    - 지중화
+    - 반덤핑
+    - 상계관세
+    - 초고압
+    - aidc
 
 # 수집 시간창. 오전 7시 실행 기준 25시간 = 전날 06시 ~ 당일 07시.
 # (전날 국내 업무시간 전체 + 밤사이 해외 뉴스를 모두 덮습니다)
@@ -154,15 +181,38 @@ industry_query_markers:
   - "-산업-"
   - "-재무-"
 
+# 커버리지 종목 가산점 (제목에 종목명이 있을 때, 최대 2개까지 누적).
+#
+# 8이던 것을 5로 낮췄습니다. 8이면 "한국가스공사, 가스텍2026 참가" 같은
+# 홍보성 기사(22.4점)가 "한전 25조 선납 막혔다"(8.6점)를 이깁니다.
+# 종목명이 들어 있다는 사실 자체는 기사의 중요도가 아닙니다.
+coverage_weight: 5
+
 # 산업·정책 기사에 주는 가산점.
-# 정책·업황 기사는 커버리지 가산점(종목당 8점)을 받을 수 없어 구조적으로
-# 점수가 낮습니다. 보정해주지 않으면 기업 뉴스에 항상 밀립니다.
-industry_weight: 8
+# 정책·업황 기사는 커버리지 가산점을 받을 수 없어 구조적으로 점수가 낮습니다.
+# 보정해주지 않으면 기업 뉴스에 항상 밀립니다. 커버리지(최대 10)보다
+# 높게 잡아, 제도·요금·전기본 같은 기사가 홍보성 기업 기사를 이기게 합니다.
+industry_weight: 12
 
 # 산업·정책 몫으로 앉히려면 최소 이 점수는 넘어야 합니다.
 # 정책 쿼리는 검색어가 넓어서 공공기관 홍보·사진기사까지 끌고 옵니다.
 # 이 문턱을 못 넘으면 그 자리는 일반 후보로 채워집니다.
-industry_min_score: 14
+# 최종 10건으로 늘리면서 11로 낮췄습니다 (중요도 하한을 약간 완화).
+industry_min_score: 11
+
+# 제목만 나가는 형식이라, 제목을 읽어도 무슨 일인지 알 수 없으면 쓸 수 없습니다.
+# 짧고 숫자도 없는 영문 제목(사설·칼럼·기획)에 주는 벌점입니다.
+# 실제로 "Power to the people?" 이 원전 1위(58.5점)를 차지한 적이 있습니다.
+weak_title_min_len: 32
+weak_title_penalty: 12
+
+# 한 기사를 여러 섹터에 보낼 조건.
+# 으뜸 섹터 점수의 0.6배 이상이면서 6점을 넘긴 섹터에도 함께 보냅니다.
+# 6점 = 제목에 커버리지 종목명이 있거나, 제목에 섹터 키워드가 둘 있는 무게.
+# 웨스팅하우스 지분 인수처럼 원전·유틸리티 담당자가 모두 봐야 하는 뉴스를
+# 한쪽만 받는 문제를 없앱니다.
+sector_secondary_ratio: 0.6
+sector_secondary_floor: 6.0
 
 # 후보 중 "산업·정책 기사"에 먼저 떼어줄 비율 (0~1).
 #
@@ -179,9 +229,64 @@ shortlist_industry_ratio: 0.35
 shortlist_ko_ratio: 0.67
 
 # 최종 선별에 쓸 모델
-model: claude-sonnet-5
+#   claude-sonnet-5  입력 $2 / 출력 $10 per 1M
+#   claude-opus-5    입력 $5 / 출력 $25 per 1M  ← 현재 설정
+#
+# 고르는 눈이 결과물의 질을 거의 결정하므로 opus 로 올렸습니다.
+# 하루 4번 호출, 후보 30건 기준이라 월 비용 차이는 크지 않습니다.
+model: claude-opus-5
 
 
+# ------------------------------------------------------------
+# 0-C. 주제별 하한·상한
+#
+#   점수만으로는 조절되지 않는 두 가지를 여기서 강제합니다.
+#     max … 이 주제가 후보를 다 먹지 못하게 상한을 둡니다.
+#     min … 점수가 구조적으로 낮아 절대 안 올라오는 주제의 자리를 먼저 뗍니다.
+#
+#   후보(pool 30) 단계에서 적용되므로, 상한 3이면 최종 10건에도 3건을
+#   넘을 수 없습니다. AI에게 "몇 건까지만 고르라"고 부탁하는 것보다 확실합니다.
+# ------------------------------------------------------------
+topic_rules:
+  건설:
+    # 재건축 수주전은 매일 쏟아집니다. 상한이 없을 때 실측하니 건설 상위
+    # 12건 중 6건이 전부 재건축이었습니다. 3건으로 묶고 남는 자리를
+    # 해외수주·정책·AI데이터센터·산업지표로 돌립니다.
+    - name: 재건축수주전
+      max: 3
+      words:
+        - 재건축
+        - 재개발
+        - 정비사업
+        - 시공사 선정
+        - 수주전
+        - 조합
+        - 단지
+        - 평당
+        - 분양
+
+  유틸리티:
+    # 미국 전력시장 제도는 종목명이 없어 점수가 낮습니다. 자리를 먼저
+    # 떼어주지 않으면 절대 안 올라옵니다.
+    - name: 미국전력시장제도
+      min: 3
+      max: 6
+      floor: 8
+      words:
+        - ferc
+        - caiso
+        - pjm
+        - ercot
+        - miso
+        - iso-ne
+        - nerc
+        - interconnection
+        - capacity market
+        - rate case
+        - tax credit
+        - 용량시장
+        - 접속 대기
+        - 전력시장 제도
 # ------------------------------------------------------------
 # 0. 커버리지 종목  ★ 이 파일에서 가장 중요한 부분입니다
 #
@@ -220,6 +325,31 @@ coverage:
       - X-energy
       - Rolls-Royce SMR
 
+  - sector: 원전
+    lang: ko
+    names:
+      - 웨스팅하우스
+      - 뉴스케일
+      - 홀텍
+      - 엑스에너지
+      - 오클로
+      - 로사톰
+      - 아레바
+      - 오라노
+      - 카메코
+      - 테라파워
+      - 카이로스파워
+      - 페르미아메리카
+      - 센트루스
+
+  # 해외 기업의 국문 표기 (2026-09-17 추가)
+  #
+  # 국내 매체는 "Westinghouse"가 아니라 "웨스팅하우스"라고 씁니다. 영문만
+  # 등록해두면 국문 기사에는 가산점이 하나도 붙지 않습니다. 실제로
+  # "[단독] 美 원전 웨스팅하우스 지분, 한국에 5~10%만 투자 제안 '진통'"
+  # 이 4.8점으로 최하위였습니다 — 그날 정답지 3곳이 모두 1면으로 다룬
+  # 기사입니다. 검색어로도 함께 쓰이므로 수집량도 늘어납니다.
+
   - sector: 건설
     lang: ko
     names:
@@ -244,6 +374,27 @@ coverage:
       - SGC에너지
       - SGC이테크건설
 
+  # 해외 EPC (2026-09-17 추가, 요청 범위대로 세 곳만)
+  # Holtec 은 현대건설의 미국 미시간 SMR 파트너라 건설 쪽 뉴스로도 잡힙니다.
+  - sector: 건설
+    lang: en
+    names:
+      - Bechtel
+      - Fluor
+      - Holtec
+
+  - sector: 유틸리티
+    lang: ko
+    names:
+      - 넥스트에라
+      - 콘스텔레이션
+      - 비스트라
+      - 셰니어
+      - 도미니언
+      - 이베르드롤라
+      - 도쿄전력
+      - 벤처글로벌
+
   - sector: 유틸리티
     lang: ko
     names:
@@ -252,6 +403,38 @@ coverage:
       - 한국지역난방공사
       - 포스코인터내셔널
       - SK가스
+
+  # 해외 전력·가스 (2026-09-17 추가)
+  # 한전·가스공사를 보는 사람이 참조하는 비교 대상입니다. 미국 IPP의
+  # 데이터센터 PPA, 원전 재가동, 요금 결정(rate case), LNG 장기계약이
+  # 국내 요금·전력수요 논의의 근거로 계속 인용됩니다.
+  - sector: 유틸리티
+    lang: en
+    names:
+      - NextEra
+      - Constellation Energy
+      - Vistra
+      - Talen Energy
+      - Cheniere
+      - Venture Global
+      - Sempra
+      - Dominion Energy
+      - Southern Company
+      - Iberdrola
+      - Enel
+      - TEPCO
+
+  - sector: 전력기기
+    lang: ko
+    names:
+      - GE버노바
+      - 지멘스에너지
+      - 히타치에너지
+      - 슈나이더일렉트릭
+      - 이튼
+      - 버티브
+      - 블룸에너지
+      - 퀀타서비스
 
   - sector: 전력기기
     lang: ko
@@ -412,6 +595,63 @@ queries:
   - name: lng-gas-global
     lang: en
     q: "(LNG OR \"natural gas\") (contract OR supply deal OR price OR terminal OR import) {window}"
+
+  # ---- 2026-09-17 추가: 정답지 대조에서 드러난 공백 ----
+  #
+  # 3주치 정답지(miraepower / jsheo / HJS_YSK)와 제 수집 풀을 대조해
+  # "풀에 아예 없던 주제"만 골라 넣었습니다. 이미 잡히던 주제
+  # (대미투자 36건, 웨스팅하우스 41건, AIDC 158건)는 건드리지 않았습니다.
+
+  # 미국 전력시장 제도 — jsheo 의 핵심 주제. 기존 풀에 3건뿐이었습니다.
+  - name: us-grid-정책-rto
+    lang: en
+    q: "(FERC OR CAISO OR PJM OR ERCOT OR MISO OR \"ISO-NE\") (interconnection OR queue OR capacity market OR transmission OR rate) {window}"
+  - name: us-grid-정책-interconnect
+    lang: en
+    q: "(\"interconnection queue\" OR \"capacity market\" OR \"transmission planning\" OR \"grid connection\") (approval OR auction OR reform OR backlog) {window}"
+  - name: us-grid-정책-incentive
+    lang: en
+    q: "(\"tax credit\" OR ITC OR PTC OR AMPC OR IRA OR FEOC) (solar OR storage OR nuclear OR transfer OR price) {window}"
+  - name: us-grid-산업-datacenter-ppa
+    lang: en
+    q: "(\"data center\" OR hyperscaler) (PPA OR \"power purchase\" OR interconnection OR nuclear OR gas turbine) {window}"
+
+  # 해외 원전 프로젝트·EPC — 기존 풀에 4건뿐이었습니다.
+  - name: nuclear-global-projects
+    lang: en
+    q: "(Rosatom OR Kazakhstan OR Vietnam OR Poland OR Czech OR Egypt) (nuclear OR reactor) (EPC OR contract OR construction OR agreement) {window}"
+  - name: nuclear-global-restart
+    lang: en
+    q: "(nuclear) (restart OR \"license renewal\" OR \"life extension\" OR uprate OR \"DOE loan\") {window}"
+
+  # 국내 전력 제도 — 용량시장·전기본·계통접속·주민수용성
+  - name: 유틸-정책-전력시장제도
+    lang: ko
+    q: "(용량시장 OR 전력수급기본계획 OR 전기본 OR 집단에너지 OR 열병합 OR 재생에너지 입찰) {window}"
+  - name: 전력기기-정책-계통접속
+    lang: ko
+    q: "(계통 접속 OR 접속 용량 OR 송전망 건설 OR 송전선로 OR 주민 수용성 OR 지중화 OR 변전소 부지) {window}"
+  - name: 유틸-정책-직접구매
+    lang: ko
+    q: "(전기사업법 OR 전력 직접구매 OR PPA OR 전력구매계약) (개정 OR 발의 OR 허용 OR 도입) {window}"
+
+  # 무역·관세 — 전력기기 실적에 직결되는데 풀에 13건뿐이었습니다.
+  - name: 전력기기-규제-관세
+    lang: ko
+    q: "(반덤핑 OR 상계관세 OR 관세) (변압기 OR 전선 OR 케이블 OR 전력기기 OR 철강) {window}"
+  - name: grid-규제-trade
+    lang: en
+    q: "(transformer OR cable OR \"grid equipment\") (tariff OR \"anti-dumping\" OR countervailing OR \"trade case\") {window}"
+
+  # 자본거래·재무 — 커버리지 종목의 자금조달·지분거래. 풀에 5건뿐이었습니다.
+  - name: 커버리지-재무-자본거래
+    lang: ko
+    q: "(효성중공업 OR HD현대일렉트릭 OR LS일렉트릭 OR 대한전선 OR LS전선 OR 두산에너빌리티 OR 현대건설 OR 대우건설 OR GS건설 OR 한국전력 OR 한국가스공사) (회사채 OR 공모채 OR 교환사채 OR 유상증자 OR 지분 매각 OR 신용등급 OR 자금 조달) {window}"
+
+  # 건설 리스크 — 근로시간·공기 연장은 풀에 1건뿐이었습니다.
+  - name: 건설-규제-근로시간
+    lang: ko
+    q: "(주 52시간 OR 근로시간 OR 공기 연장 OR 공사기간 OR 노무비) (건설 OR 원전 OR 현장 OR 플랜트) {window}"
 
 
 # ------------------------------------------------------------
@@ -615,6 +855,59 @@ scoring:
       - expansion
       - lead time
       - long-term contract
+      # 자본거래·재무 (2026-09-17 추가)
+      #   정답지에 있던 "LS전선, 가온전선 주식 교환사채로 5000억 조달",
+      #   "대한전선 400억 공모채", "포스코홀딩스 포스코인터 지분 20.7% 처분",
+      #   "무디스, 한전·가스공사 신용도" 를 제가 전부 놓치고 있었습니다.
+      - 교환사채
+      - 전환사채
+      - 공모채
+      - 회사채
+      - 신용등급
+      - 신용도
+      - 지분
+      - 지분 인수
+      - 지분 처분
+      - 지분 매각
+      - 투자 제안
+      - 인수 제안
+      # 다른 매체가 아직 안 쓴 새 정보라는 뜻이라 가산합니다
+      - 단독
+      - 유상증자
+      - 자산 인수
+      - 인수합병
+      - 매각 추진
+      - 자금 조달
+      - 공시
+      - bond issue
+      - credit rating
+      - stake
+      - acquisition
+      - divest
+      # 무역·관세 (전력기기 실적에 직결)
+      - 반덤핑
+      - 상계관세
+      - 관세 부과
+      - 관세 인상
+      - 수출 규제
+      - 무역확장법
+      - anti-dumping
+      - countervailing
+      - tariff hike
+      - export control
+      # 전력시장 제도
+      - 용량시장
+      - 전력수급기본계획
+      - 전기본
+      - 계통 접속
+      - 접속 용량
+      - 주민 수용성
+      - 직접구매
+      - 전기사업법
+      - interconnection
+      - capacity market
+      - rate case
+      - transmission plan
 
   # 시장 영향력이 큰 주체
   player:
@@ -668,6 +961,24 @@ scoring:
       - Hitachi Energy
       - Schneider Electric
       - Eaton
+      # 국문 표기 — 국내 매체가 쓰는 이름 (2026-09-17 추가)
+      - 웨스팅하우스
+      - 뉴스케일
+      - 홀텍
+      - 엑스에너지
+      - 오클로
+      - 로사톰
+      - 오라노
+      - 카메코
+      - GE버노바
+      - 지멘스에너지
+      - 히타치에너지
+      - 넥스트에라
+      - 콘스텔레이션
+      - 비스트라
+      - 셰니어
+      - 벡텔
+      - 플루오
 
   # 노이즈 — 점수를 깎습니다.
   # event(+5)가 여러 개 걸린 진짜 뉴스는 살아남도록 -8로 둡니다.
@@ -706,9 +1017,30 @@ scoring:
       - 코스피 마감
       - 코스닥 마감
       - shares rise
+      - insider
+      - stock sale
+      - share price
+      - price target
       - shares fall
       - stock jumps
       # 홍보·사회공헌·행사성
+      - 주최
+      - 공동주최
+      - 개막
+      - 폐막
+      - 발대식
+      - 현판식
+      - 위촉
+      - 홍보대사
+      - 판촉
+      - 명절
+      - 인정받아
+      - 선보여
+      - 과시
+      - 우수기업
+      - 外
+      - 전면 확대
+      - 시범 운영
       - 사회공헌
       - 봉사활동
       - 기부
@@ -732,10 +1064,127 @@ scoring:
 #    (홍보성 기사가 "여러 매체가 받아썼다" 보너스로 살아남는 걸 막습니다)
 #    ※ 제목에만 적용하므로 본문에 우연히 섞인 단어로는 탈락하지 않습니다.
 # ------------------------------------------------------------
+# 아예 보지 않을 매체. 제목이 멀쩡해 보여도 내용이 주가 시황인 곳들입니다.
+# 이런 사이트가 영문 후보 자리를 상당수 차지하고 있었습니다.
+blocked_outlets:
+  - Zacks
+  - Simply Wall St
+  - Insider Monkey
+  - Benzinga
+  - Motley Fool
+  - TipRanks
+  - Investing.com
+  - MarketBeat
+  - StockNews
+  - Seeking Alpha
+  - GuruFocus
+  - 24/7 Wall St
+
 blocklist:
+  # ── 행사·전시·수상·내부인사 (2026-09-17 추가) ──────────────
+  #
+  # 정답지 채널 3곳을 3주치 대조한 결과, 제 결과물의 자리를 가장 많이
+  # 잡아먹던 세 종류입니다. 예: "한국가스공사, 가스텍2026 참가"가
+  # "한전 25조 선납 막혔다"보다 높은 점수를 받고 있었습니다.
+  #
+  # ※ MOU·협약·공동개발은 일부러 넣지 않았습니다. 정답지에 있는
+  #   "LS일렉트릭-한전 그리드포밍 공동개발", "한전기술-포스코이앤씨 SMR 협약"
+  #   이 함께 버려지기 때문입니다.
+  #
+  # 전시회·박람회·행사
+  # 실측: 제목에 '참가'가 든 14건 전부 행사성이었고 입찰·공모는 0건이었습니다.
+  - 참가
+  - 에너지대전
+  - 전시회
+  - 박람회
+  - 엑스포
+  - 전시관
+  - 시연회
+  - 설명회
+  - 세미나
+  - 포럼 개최
+  - 콘퍼런스
+  - 컨퍼런스
+  - 학술대회
+  - 심포지엄
+  - 토론회
+  - 공청회 개최
+  - 체험전
+  - 페스티벌
+  - 출품
+  # 수상·인증·표창 ("수상"은 수상태양광과 겹쳐 단독으로 쓰지 않습니다)
+  - 장관상
+  - 대통령상
+  - 상 수상
+  - 수상자
+  - 우수상
+  - 공로상
+  - 최우수상
+  - 표창
+  - ESG 대상
+  - 종합대상
+  - 대상 수상
+  - 인증 획득
+  - 인증 취득
+  # 내부 경영·노사·인사
+  - 노동조합
+  - 시의회
+  - 도의회
+  - 군의회
+  - 현장 점검
+  - 노조위원장
+  - 임단협
+  - 성명 발표
+  - 임원 인사
+  - 정기 인사
+  - 인사 발령
+  - 신규 선임
+  - 독립이사
+  - 사외이사
+  - 사장 내정
+  - 대표 취임
+  - 사장 취임
+  - 조직개편
+  - 창립기념
+  - 사내 교육
+  - 사내 벤처
+  - 사내 공모
+
+  # 영상·쇼츠·묶음 브리핑
+  - "#shorts"
+  - "#Shorts"
+  - 쇼츠
+
+  # 섹터 키워드 오매칭 — '케이블카'가 전력 '케이블'로 잡힙니다
+  - 케이블카
+  - 모노레일
+
   # 주가 시황·수급
   - 특징주
   - 상한가
+  - 엇갈린
+  - 동반 강세
+  - 동반 약세
+  - 오름세
+  - 내림세
+  - 원전주
+  - 건설주
+  - 전력주
+  - 조선주
+  - 株
+  - 훨훨
+  - 들썩
+  - 기대감에
+  - 신고가
+  - 52주
+  - 시간외
+  - 상승 마감
+  - 하락 마감
+  - 장 초반
+  - 순매수
+  - 순매도
+  - 공매도
+  - 거래대금
   - 하한가
   - 장중
   - 급등
@@ -789,6 +1238,13 @@ blocklist:
   - upgraded
   - price target
   - analyst rating
+  - insider
+  - stock sale
+  - stock may
+  - share price
+  - price target
+  - stock jumps
+  - stock falls
   - stocks to buy
   - stock to watch
   - buy rating
@@ -910,4 +1366,4 @@ shortlist_dedup_threshold: 0.30
 # 자리를 여러 개 먹는 걸 막습니다. 낮출수록 주제가 다양해지지만
 # 무관한 기사까지 같은 사건으로 오인할 수 있습니다. (0.40 권장)
 # 국문↔영문 중복은 문자 비교로 못 잡으므로 AI 선별 단계에서 한 번 더 걸러냅니다.
-shortlist_word_overlap: 0.40
+shortlist_word_overlap: 0.34
