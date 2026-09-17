@@ -64,13 +64,46 @@ class Cluster:
     articles: list[Article] = field(default_factory=list)
     score: float = 0.0
     coverage: list[str] = field(default_factory=list)  # 제목에 등장한 커버리지 종목
-    sector: str = ""  # 원전 / 건설 / 유틸리티 / 전력기기
+    # 한 기사가 여러 섹터에 걸릴 수 있습니다. 웨스팅하우스 지분 인수는
+    # 원전 담당자와 유틸리티 담당자가 모두 봐야 하는 뉴스입니다.
+    sectors: list[str] = field(default_factory=list)
     industry: bool = False  # 산업·정책 쿼리에서 나온 기사인가
 
     @property
-    def lead(self) -> Article:
-        # 가장 먼저 보도한 기사를 대표로
+    def first(self) -> Article:
+        """가장 먼저 보도한 기사. 기사의 나이를 잴 때만 씁니다."""
         return min(self.articles, key=lambda a: a.published)
+
+    @property
+    def lead(self) -> Article:
+        """대표 기사 — 화면에 제목이 그대로 나가므로 '가장 잘 읽히는' 것을 고릅니다.
+
+        예전에는 가장 먼저 보도한 기사를 대표로 삼았습니다. 그랬더니 같은
+        사건을 다룬 기사가 여럿 묶여 있는데도 "Power to the people?" 같은
+        외신 사설 제목이 대표가 되어 나갔습니다. 제목이 곧 전부인 형식이라
+        이건 그 자리를 통째로 버리는 것과 같습니다.
+
+        점수 기준 — 숫자(금액·용량·일정)가 있으면 크게 가산, 적당한 길이를
+        선호, 의문형·지나치게 짧은 제목은 감점. 같으면 먼저 나온 기사.
+        """
+        def rank(a: Article) -> tuple:
+            t = (a.title or "").strip()
+            score = 0.0
+            if any(ch.isdigit() for ch in t):
+                score += 3          # 금액·수치가 제목에 있으면 정보량이 크다
+            if 20 <= len(t) <= 90:
+                score += 2
+            if len(t) < 16:
+                score -= 3
+            if len(t) > 140:
+                score -= 4          # 한 문단을 통째로 제목에 넣은 기사
+            if t.endswith("?"):
+                score -= 2          # 사설·칼럼 제목
+            if a.lang == "ko":
+                score += 1          # 같은 값이면 국문이 읽기 쉽다
+            return (score, -a.published.timestamp())
+
+        return max(self.articles, key=rank)
 
     @property
     def outlets(self) -> list[str]:
@@ -310,18 +343,28 @@ def coverage_groups(cfg: dict) -> list[tuple[str, str, list[str]]]:
     ]
 
 
-def coverage_sectors(cfg: dict) -> dict[str, str]:
-    """종목명 → 섹터. 섹터 판정에서 가장 강한 신호입니다."""
-    out: dict[str, str] = {}
+def coverage_sectors(cfg: dict) -> dict[str, list[str]]:
+    """종목명 → 섹터 목록. 섹터 판정에서 가장 강한 신호입니다.
+
+    한 종목이 두 섹터에 걸치는 경우가 있습니다 — 한국전력은 원전 사업자이자
+    전력 유틸리티이고, Holtec 은 SMR 개발사이자 현대건설의 미국 프로젝트
+    파트너입니다. 예전에는 먼저 등록된 섹터 하나만 남겨서, 한국전력 기사가
+    유틸리티 배정에서 가산점을 전혀 받지 못했습니다.
+    """
+    out: dict[str, list[str]] = {}
     for sector, _, names in coverage_groups(cfg):
         for n in names:
-            out.setdefault(n.lower(), sector)
+            bucket = out.setdefault(n.lower(), [])
+            if sector not in bucket:
+                bucket.append(sector)
     return out
 
 
-def infer_sector(cluster: Cluster, sector_words: dict[str, list[str]],
-                 cov_sector: dict[str, str]) -> str:
-    """기사를 네 섹터 중 하나로 배정합니다.
+def infer_sectors(cluster: Cluster, sector_words: dict[str, list[str]],
+                  cov_sector: dict[str, list[str]],
+                  secondary_ratio: float = 0.6,
+                  secondary_floor: float = 6.0) -> list[str]:
+    """기사를 섹터에 배정합니다. 여러 섹터에 걸치면 여러 개를 돌려줍니다.
 
     신호의 무게를 셋으로 나눕니다.
       커버리지 종목명이 제목에  … 6점 — 가장 확실한 신호
@@ -332,14 +375,21 @@ def infer_sector(cluster: Cluster, sector_words: dict[str, list[str]],
     "한전이 반도체 기업에 5년치 전기요금 선납을 요구하는 이유"가 본문 요약에
     섞인 건설 관련 단어들 때문에 [건설]로 배정된 적이 있습니다.
     제목이 곧 기사의 주제이므로 제목에 훨씬 큰 무게를 둡니다.
+
+    으뜸 섹터 점수의 secondary_ratio 배 이상이면서 secondary_floor 점을
+    넘긴 섹터는 함께 돌려줍니다. 6점은 "제목에 커버리지 종목명이 있다"
+    또는 "제목에 섹터 키워드가 둘 있다"에 해당하는 무게입니다.
     """
     titles = " ".join(a.title for a in cluster.articles).lower()
     snippets = " ".join(a.snippet for a in cluster.articles).lower()
 
     points = {s: 0.0 for s in sector_words}
-    for name, sector in cov_sector.items():
-        if name in titles and sector in points:
-            points[sector] += 6
+    for name, sectors in cov_sector.items():
+        if name not in titles:
+            continue
+        for sector in sectors:
+            if sector in points:
+                points[sector] += 6
     for sector, words in sector_words.items():
         for w in words:
             w = w.lower()
@@ -349,7 +399,14 @@ def infer_sector(cluster: Cluster, sector_words: dict[str, list[str]],
                 points[sector] += 1
 
     best = max(points, key=lambda s: points[s])
-    return best if points[best] > 0 else ""
+    if points[best] <= 0:
+        return []
+
+    # 으뜸 섹터는 무조건 넣고, 그에 견줄 만한 점수를 받은 섹터도 함께 넣습니다.
+    # 문턱을 둘 다 넘어야 합니다 — 비율만 보면 으뜸 점수가 낮은 날에 엉뚱한
+    # 섹터가 붙고, 절대값만 보면 확실한 주제의 곁가지까지 다 붙습니다.
+    cut = max(points[best] * secondary_ratio, secondary_floor)
+    return [best] + [s for s, v in points.items() if s != best and v >= cut]
 
 
 def coverage_names(cfg: dict) -> list[str]:
@@ -449,6 +506,7 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
     rules = cfg["scoring"]
     topic_words = [w.lower() for w in rules["topic"]["words"]]
     blocked = [w.lower() for w in cfg.get("blocklist") or []]
+    bad_outlets = [w.lower() for w in cfg.get("blocked_outlets") or []]
     bonus_per_outlet = cfg.get("cluster_bonus", 3)
     covered = [n.lower() for n in coverage_names(cfg)]
     coverage_weight = cfg.get("coverage_weight", 8)
@@ -456,6 +514,8 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
     cov_sector = coverage_sectors(cfg)
     industry_markers = list(cfg.get("industry_query_markers") or [])
     industry_weight = cfg.get("industry_weight", 6)
+    weak_title_len = cfg.get("weak_title_min_len", 32)
+    weak_title_penalty = cfg.get("weak_title_penalty", 12)
 
     scored: list[Cluster] = []
     dropped = 0
@@ -475,6 +535,14 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
 
         # 홍보성·시황 기사는 매체 수 보너스로 살아남지 못하게 즉시 제거합니다.
         if any(w in titles for w in blocked):
+            dropped += 1
+            continue
+
+        # 주가 시황 전문 사이트는 제목이 멀쩡해도 내용이 시황입니다.
+        # 클러스터의 모든 기사가 그런 매체라면 통째로 버립니다.
+        if bad_outlets and all(
+            any(b in (a.outlet or "").lower() for b in bad_outlets) for a in c.articles
+        ):
             dropped += 1
             continue
 
@@ -498,8 +566,22 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
         score += (len(c.outlets) - 1) * bonus_per_outlet
 
         # 최신 기사 가산 (24시간에 걸쳐 0~4점)
-        age_h = (end - c.lead.published).total_seconds() / 3600
+        age_h = (end - c.first.published).total_seconds() / 3600
         score += max(0.0, 4.0 - age_h / 6)
+
+        # 제목만 나가는 형식이라, 제목을 읽어도 무슨 일인지 알 수 없는 기사는
+        # 아무리 점수가 높아도 쓸 수 없습니다. 실제로 "Power to the people?"
+        # 같은 외신 제목이 1위를 차지한 적이 있습니다. 짧고 숫자·고유명사도
+        # 없는 영문 제목(대개 사설·칼럼·기획)에 벌점을 줍니다.
+        lead_title = c.lead.title or ""
+        if c.lead.lang == "en":
+            short = len(lead_title) < weak_title_len or lead_title.rstrip().endswith("?")
+            if short and not any(ch.isdigit() for ch in lead_title):
+                score -= weak_title_penalty
+            # 제목에 기사 한 문단을 통째로 넣는 매체가 있습니다. 텔레그램에서
+            # 화면을 다 차지하면서도 무슨 일인지 전달이 안 됩니다.
+            if len(lead_title) > 140:
+                score -= weak_title_penalty
 
         # 어떤 쿼리가 이 기사를 찾았는지가 "산업·정책 기사"의 가장 정확한
         # 신호입니다. 제목에 종목명이 없다는 것만으로는 재건축 시공사 선정
@@ -513,15 +595,18 @@ def score_clusters(clusters: list[Cluster], cfg: dict, end: datetime) -> list[Cl
             score += industry_weight
 
         c.score = score
-        c.sector = infer_sector(c, sector_words, cov_sector)
+        c.sectors = infer_sectors(c, sector_words, cov_sector,
+                                  cfg.get('sector_secondary_ratio', 0.6),
+                                  cfg.get('sector_secondary_floor', 6.0))
         scored.append(c)
 
     scored.sort(key=lambda c: c.score, reverse=True)
-    by_sector = {s: sum(1 for c in scored if c.sector == s) for s in sector_words}
-    unassigned = sum(1 for c in scored if not c.sector)
+    by_sector = {s: sum(1 for c in scored if s in c.sectors) for s in sector_words}
+    unassigned = sum(1 for c in scored if not c.sectors)
+    multi = sum(1 for c in scored if len(c.sectors) > 1)
     print(f"      차단어로 제외 {dropped}건 → 채점 대상 {len(scored)}건 (커버리지 {with_coverage}건)")
     print("      섹터 배정: " + " / ".join(f"{s} {n}" for s, n in by_sector.items())
-          + f" / 미배정 {unassigned}")
+          + f" / 미배정 {unassigned} (둘 이상 겹침 {multi}건)")
     return scored
 
 
@@ -568,7 +653,45 @@ def shortlist_for(sector: str, pool: int, scored: list[Cluster], cfg: dict) -> l
        많이 걸립니다. 반반으로 두면 저품질 외신이 자리를 절반이나 먹습니다.
     """
     picker = Picker(cfg["shortlist_dedup_threshold"], cfg["shortlist_word_overlap"])
-    mine = [c for c in scored if c.sector == sector]
+    mine = [c for c in scored if sector in c.sectors]
+
+    # 주제 규칙 — 특정 주제에 자리를 먼저 떼어주거나(min), 몰리지 않게
+    # 상한을 둡니다(max). 점수만으로는 조절할 수 없는 것들입니다.
+    #   재건축 수주전은 매일 쏟아져서 상한이 없으면 건설 후보를 다 먹습니다.
+    #   미국 전력시장 제도는 종목명이 없어 점수가 낮아 하한이 없으면 안 올라옵니다.
+    rules = list((cfg.get("topic_rules") or {}).get(sector) or [])
+    for r in rules:
+        r["_words"] = [w.lower() for w in r.get("words", [])]
+        r["_n"] = 0
+
+    def topics_of(c: Cluster) -> list[dict]:
+        blob = " ".join(f"{a.title} {a.snippet}" for a in c.articles).lower()
+        return [r for r in rules if any(w in blob for w in r["_words"])]
+
+    def over_cap(c: Cluster) -> bool:
+        return any(r["_n"] >= r["max"] for r in topics_of(c) if "max" in r)
+
+    def note(c: Cluster) -> None:
+        for r in topics_of(c):
+            r["_n"] += 1
+
+    def take(c: Cluster) -> bool:
+        """상한을 지키면서 후보로 채택합니다."""
+        if over_cap(c) or not picker.take(c):
+            return False
+        note(c)
+        return True
+
+    # 주제 하한: 자리를 먼저 확보합니다. 점수 문턱은 산업·정책과 같이 씁니다.
+    for r in rules:
+        want = r.get("min", 0)
+        if not want:
+            continue
+        for c in mine:
+            if r["_n"] >= want:
+                break
+            if c.score >= r.get("floor", 0) and r in topics_of(c):
+                take(c)
 
     # 1) 산업·정책 몫: 산업·정책 쿼리에서 나온 기사로 먼저 채웁니다.
     #    단 점수 문턱을 둡니다 — 정책 쿼리는 검색어가 넓어 공공기관 홍보나
@@ -580,7 +703,7 @@ def shortlist_for(sector: str, pool: int, scored: list[Cluster], cfg: dict) -> l
         for c in mine:
             if taken >= industry_quota:
                 break
-            if c.industry and c.score >= floor and picker.take(c):
+            if c.industry and c.score >= floor and take(c):
                 taken += 1
 
     # 2) 나머지는 점수순으로, 국내/해외 비율을 맞춰 채웁니다.
@@ -590,13 +713,13 @@ def shortlist_for(sector: str, pool: int, scored: list[Cluster], cfg: dict) -> l
         for c in mine:
             if taken >= quota:
                 break
-            if c.lead.lang == lang and picker.take(c):
+            if c.lead.lang == lang and take(c):
                 taken += 1
 
     for c in mine:  # 한쪽이 모자라면 남은 자리를 채웁니다
         if len(picker.picked) >= pool:
             break
-        picker.take(c)
+        take(c)
 
     picker.picked.sort(key=lambda c: c.score, reverse=True)
     return picker.picked
@@ -635,7 +758,9 @@ SYSTEM = """\
   2순위. 섹터 전체의 수요·가격·정책이 바뀌는 뉴스
          (전기·가스 요금, 원전 정책과 인허가, 건설 규제, 변압기 업황, 연료비)
   3순위. 경쟁사·전방산업 동향 (해외 포함)
-         (Westinghouse·EDF 수주, GE Vernova 실적, 미국 데이터센터 증설)
+         (Westinghouse·EDF 수주, GE Vernova 실적, 미국 데이터센터 증설,
+          미국 전력시장 제도 — FERC·CAISO·PJM·ERCOT 접속대기·용량시장·세액공제.
+          국내 요금·계통 논의의 근거로 계속 인용되므로 2~3건은 챙기십시오)
   제외.  주가 시황·특징주, 홍보성 기사, 단순 행사 소식
 
 [선별 원칙]
@@ -648,8 +773,13 @@ SYSTEM = """\
 - 여러 매체가 동시에 다뤘다면 그만큼 중요하다는 신호
 - 국내와 해외를 균형 있게 담되, 억지로 맞추지는 마십시오
 - 다음은 제외합니다: 단순 주가 등락·특징주, 분양 광고성 기사, 인사·동정,
-  스포츠 후원·기부·견학 같은 홍보성 사회공헌 기사, 단순 행사 개최 소식
-- 중요한 뉴스가 부족하면 요청 개수보다 적게 골라도 됩니다
+  스포츠 후원·기부·견학 같은 홍보성 사회공헌 기사, 단순 행사 개최 소식,
+  전시회·박람회 참가, 수상·인증 소식, 노사·내부 인사 소식
+- 해외 기사는 규모를 보십시오. "독일이 우크라이나 원전에 100만 유로를 추가
+  지원" 처럼 금액·영향이 작은 소식은 자리를 차지할 가치가 없습니다. 반면
+  같은 해외라도 경쟁사의 수주·실적·제도 변화는 중요합니다.
+- 요청 개수를 채우는 것을 기본으로 하십시오. 3순위까지 내려가도 좋습니다.
+  다만 위 제외 항목에 해당하는 기사를 개수를 맞추려고 넣지는 마십시오.
 
 [작성 형식] — 최종 결과물은 아래처럼 렌더링됩니다. 한 항목은 딱 세 줄입니다.
 
@@ -735,7 +865,7 @@ def curate(shortlist: list[Cluster], cfg: dict, sector: str, size: int,
 
     user = (
         f"{target_date} 자 {sector} 뉴스 후보 {len(shortlist)}건입니다.\n"
-        f"이 중 가장 중요한 {size}건 이내를 골라 주십시오.\n\n"
+        f"이 중 가장 중요한 {size}건을 골라 주십시오. 채울 만한 기사가 정말 없을 때만 {size}건보다 적어도 됩니다.\n\n"
         f"{candidates}"
     )
 
