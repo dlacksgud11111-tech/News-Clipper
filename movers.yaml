@@ -1,0 +1,106 @@
+# ============================================================
+#  해외 급등락 알림 설정
+#
+#  이 파일만 고치면 종목·임계값·발송 채널이 전부 바뀝니다.
+#  데일리 클리핑(config.yaml)과는 완전히 분리돼 있습니다.
+# ============================================================
+
+timezone: Asia/Seoul
+
+# 텔레그램 채널. 값이 비어 있거나 그 이름의 시크릿이 없으면
+# 공용 TELEGRAM_CHAT_ID 로 떨어집니다. 채널을 아직 안 만들었어도
+# 메시지가 사라지지 않게 하기 위한 장치입니다.
+chat_id_env: TELEGRAM_CHAT_ID_MOVERS
+
+# ------------------------------------------------------------
+#  급등락 판정
+#
+#  판정은 '당일 정규장 종가 ÷ 전 거래일 종가' 하나로만 합니다.
+#  시간외를 섞어 하나의 수치로 만들면 정규장 +10% 가 시간외 되돌림으로
+#  +3% 가 되어 그날 가장 큰 사건을 놓칩니다. 시간외는 꼬리표로만 붙입니다.
+# ------------------------------------------------------------
+threshold_pct: 5.0        # |변동률| 이 값 이상이면 목록에 넣습니다
+extended_min_pct: 3.0     # 시간외가 이만큼 움직였을 때만 꼬리표를 붙입니다
+sanity_max_pct: 25.0      # 이보다 크면 액면분할·병합을 의심해 '검증 필요' 표시
+
+# ------------------------------------------------------------
+#  원인 탐색 (Claude 웹서치)
+#
+#  기존 클리핑의 RSS 수집·차단어·스코어링은 쓰지 않습니다. 그쪽은
+#  '주가 시황 기사를 배제'하도록 만들어진 파이프라인이라 목적이 정반대입니다.
+# ------------------------------------------------------------
+ai:
+  enabled: true
+  model: claude-opus-5
+  effort: high
+  max_searches: 12        # 한 번 실행에서 웹서치를 몇 번까지 쓸지
+  max_tokens: 16000
+
+# ------------------------------------------------------------
+#  추적 종목
+#
+#  sector  : 메시지에서 묶이는 단위. 순서대로 출력됩니다.
+#  ticker  : yfinance 심볼. 유럽은 ADR 이 아니라 현지 상장을 씁니다
+#            (거래량이 얇은 ADR 은 가짜 급등락을 만듭니다).
+#  name    : 메시지에 나갈 이름. 한글은 고정폭에서 폭이 어긋나 정렬이
+#            깨지므로 영문으로 둡니다.
+#
+#  일본 종목은 넣지 않습니다. 도쿄장은 한국시간 15:30 에 끝나서
+#  미국·유럽과 다른 날짜의 종가가 한 메시지에 섞입니다.
+# ------------------------------------------------------------
+sectors:
+  - name: 원전·연료
+    emoji: ⚛️
+    tickers:
+      - {ticker: CEG,  name: Constellation}
+      - {ticker: VST,  name: Vistra}
+      - {ticker: TLN,  name: Talen Energy}
+      - {ticker: CCJ,  name: Cameco}
+      - {ticker: BWXT, name: BWX Technologies}
+      - {ticker: LEU,  name: Centrus Energy}
+      - {ticker: OKLO, name: Oklo}
+      - {ticker: SMR,  name: NuScale Power}
+      # 웨스팅하우스 최대주주. 비상장 원전사를 대리하는 유일한 상장 창구입니다.
+      - {ticker: BN,   name: Brookfield Corp}
+
+  - name: 전력기기·전력망
+    emoji: 🔌
+    tickers:
+      - {ticker: GEV,     name: GE Vernova}
+      - {ticker: ENR.DE,  name: Siemens Energy}
+      - {ticker: ETN,     name: Eaton}
+      - {ticker: HUBB,    name: Hubbell}
+      - {ticker: NVT,     name: nVent}
+      - {ticker: VRT,     name: Vertiv}
+      - {ticker: ABBN.SW, name: ABB}
+      - {ticker: SU.PA,   name: Schneider Electric}
+      - {ticker: PRY.MI,  name: Prysmian}
+      - {ticker: NEX.PA,  name: Nexans}
+      - {ticker: NKT.CO,  name: NKT}
+      - {ticker: PWR,     name: Quanta Services}
+
+  - name: 분산발전·DC전원
+    emoji: 🔋
+    tickers:
+      - {ticker: BE,   name: Bloom Energy}
+      - {ticker: GNRC, name: Generac}
+      - {ticker: INIO, name: INNIO}
+      - {ticker: CAT,  name: Caterpillar}
+      - {ticker: CMI,  name: Cummins}
+      - {ticker: FLNC, name: Fluence Energy}
+      - {ticker: NVTS, name: Navitas}
+      - {ticker: VICR, name: Vicor}
+      - {ticker: JBL,  name: Jabil}
+
+  - name: 유틸리티
+    emoji: ⚡
+    tickers:
+      - {ticker: NEE,    name: NextEra Energy}
+      - {ticker: D,      name: Dominion Energy}
+      - {ticker: NRG,    name: NRG Energy}
+      - {ticker: RWE.DE, name: RWE}
+      - {ticker: NG.L,   name: National Grid}
+      - {ticker: XEL,    name: Xcel Energy}
+      - {ticker: DTE,    name: DTE Energy}
+      - {ticker: PCG,    name: PG&E}
+      - {ticker: AES,    name: AES}

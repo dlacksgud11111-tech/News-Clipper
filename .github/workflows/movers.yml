@@ -1,0 +1,159 @@
+name: 해외 급등락 알림
+
+# ─────────────────────────────────────────────────────────────
+#  daily-clipping.yml 과 같은 구조입니다. 왜 "기다렸다가" 보내는지에 대한
+#  설명은 그쪽 주석을 보세요. 요약하면 GitHub 예약은 언제 도착할지도,
+#  도착하기는 할지도 보장되지 않기 때문에, 몇 시에 도착하든 그 실행이
+#  잠들어 있다가 정시에 깨어나 보냅니다.
+#
+#  일부러 워크플로를 따로 둡니다. 주가 조회나 웹서치가 실패해도 07:00
+#  뉴스 클리핑은 그대로 나가야 합니다. 클리핑에 얹으면 한쪽 사고가
+#  양쪽을 멈추게 됩니다.
+#
+#  발송은 07:30 입니다. 07:00 에 클리핑 4통이 먼저 도착하고, 30분 뒤에
+#  주가가 옵니다. 읽는 순서가 섞이지 않고 원인 기사도 30분치 더 쌓입니다.
+# ─────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # UTC 17:12 ~ 22:52 = KST 02:12 ~ 07:52, 20분 간격.
+    # 클리핑(7,27,47분)과 5분씩 어긋나게 둬서 두 작업이 같은 순간에
+    # 큐를 다투지 않게 했습니다.
+    - cron: "12,32,52 17-22 * * *"
+
+  # 바깥에서 깨우는 입구입니다. 구글 앱스 스크립트가 새벽에 한 번 부릅니다.
+  # GitHub 예약이 그날 한 칸도 실행되지 않아도 정시 발송이 보장됩니다.
+  workflow_dispatch:
+    inputs:
+      wait:
+        description: "발송 시각까지 기다렸다 보내기 (끄면 즉시 발송)"
+        type: boolean
+        default: false
+
+# movers/ 아래 기록(CSV·state.json)을 다시 커밋하기 위해 필요합니다.
+permissions:
+  contents: write
+
+concurrency:
+  group: movers
+  cancel-in-progress: false
+
+env:
+  SEND_AT: "07:30" # 목표 발송 시각 (KST)
+  # 시세 39종목 조회는 10~20초, 원인 탐색(웹서치)은 1~3분입니다.
+  # 8분이면 넉넉하고, 넘기더라도 준비가 끝나는 즉시 보냅니다.
+  PREP_MIN: "8"
+  # 가장 이른 칸(KST 02:12)에서 07:30 까지가 318분입니다.
+  MAX_WAIT_MIN: "330"
+
+jobs:
+  movers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # MAX_WAIT_MIN + 조회·탐색·전송 여유분
+
+    steps:
+      - name: 오늘 날짜 (KST)
+        id: day
+        run: echo "today=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: 오늘 이미 보냈는지 확인
+        id: guard
+        uses: actions/cache/restore@v4
+        with:
+          path: .movers-sent
+          key: movers-sent-${{ steps.day.outputs.today }}
+
+      - name: 이미 보냈으면 여기서 끝
+        if: steps.guard.outputs.cache-hit == 'true'
+        run: echo "오늘(${{ steps.day.outputs.today }}) 이미 발송했습니다. 종료합니다."
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.cache-hit != 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+        if: steps.guard.outputs.cache-hit != 'true'
+
+      # 예약 실행과 'wait=true'로 깨워진 실행은 준비 시작 시각까지 잠듭니다.
+      # 버튼으로 누른 수동 실행은 즉시 보내야 하므로 건너뜁니다.
+      - name: 준비 시작 시각까지 대기
+        if: steps.guard.outputs.cache-hit != 'true' && (github.event_name == 'schedule' || inputs.wait)
+        run: |
+          now=$(date +%s)
+          target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
+          prep=$(( target - PREP_MIN * 60 ))
+          wait=$(( prep - now ))
+          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M') KST"
+          echo "준비 시작 $(TZ=Asia/Seoul date -d "@$prep" +'%H:%M') / 발송 ${SEND_AT} KST"
+          if [ "$wait" -le 0 ]; then
+            echo "이미 준비 시작 시각을 지났습니다 ($(( -wait / 60 ))분 경과). 바로 진행합니다."
+            exit 0
+          fi
+          cap=$(( MAX_WAIT_MIN * 60 ))
+          if [ "$wait" -gt "$cap" ]; then
+            echo "대기 시간이 상한(${MAX_WAIT_MIN}분)을 넘어 상한까지만 기다립니다."
+            wait=$cap
+          fi
+          echo "$(( wait / 60 ))분 $(( wait % 60 ))초 대기합니다."
+          sleep "$wait"
+          echo "깨어남: $(TZ=Asia/Seoul date +'%m/%d %H:%M:%S') KST"
+
+      # 자는 동안 다른 실행이 발송을 마쳤을 수도 있으므로 한 번 더 확인합니다.
+      - name: 대기 중에 누가 보냈는지 재확인
+        id: guard2
+        if: steps.guard.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .movers-sent
+          key: movers-sent-${{ steps.day.outputs.today }}
+
+      - name: 시세 조회·원인 탐색·전송
+        id: run
+        if: steps.guard.outputs.cache-hit != 'true' && steps.guard2.outputs.cache-hit != 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 전용 채널 주소. 이 줄을 빠뜨리면 채널을 만들어 놨어도 GitHub 에서
+          # 돌 때는 공용 TELEGRAM_CHAT_ID 로만 갑니다 — 시크릿은 env 로 넘겨야
+          # 프로세스에 보입니다. (daily-clipping.yml 이 이 함정을 밟고 있습니다)
+          TELEGRAM_CHAT_ID_MOVERS: ${{ secrets.TELEGRAM_CHAT_ID_MOVERS }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.wait }}" = "true" ]; then
+            python movers.py --marker .movers-sent --send-at "$SEND_AT"
+          else
+            python movers.py --marker .movers-sent
+          fi
+
+      # 실제로 보냈을 때만 표시가 생깁니다. 전송이 실패한 실행은 표시를
+      # 남기지 않으므로 뒤따르는 예약이 다시 시도합니다.
+      - name: 발송했으면 오늘 표시 저장
+        if: steps.guard.outputs.cache-hit != 'true' && steps.guard2.outputs.cache-hit != 'true' && hashFiles('.movers-sent') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .movers-sent
+          key: movers-sent-${{ steps.day.outputs.today }}
+
+      # 기록을 저장소에 남깁니다. movers/state.json 이 '이 거래일은 이미
+      # 보냈다'를 기억하는 곳이라, 커밋이 안 되면 휴장일에 어제 등락률이
+      # 다시 나갈 수 있습니다. 다만 커밋 실패가 발송을 실패로 만들지는
+      # 않게 둡니다 — 메시지는 이미 나갔으니까요.
+      - name: 기록 커밋
+        if: always() && steps.run.outcome == 'success'
+        continue-on-error: true
+        run: |
+          if [ -z "$(git status --porcelain movers)" ]; then
+            echo "기록에 변화가 없습니다."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add movers
+          git commit -m "movers: $(TZ=Asia/Seoul date +%F) 기록"
+          # 다른 실행이 먼저 밀어 넣었을 수 있으므로 한 번 당겨 붙입니다.
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+          git push origin "HEAD:${GITHUB_REF_NAME}"
