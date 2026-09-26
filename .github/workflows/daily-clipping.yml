@@ -145,6 +145,15 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 섹터별 채널 주소. config.yaml 의 digests[].chat_id_env 가 이 이름들을
+          # 찾습니다. 시크릿은 여기 env 로 넘겨야 프로세스에 보이므로, 이 네 줄이
+          # 없으면 채널을 만들어 놨어도 네 다이제스트가 전부 공용 TELEGRAM_CHAT_ID
+          # 한 곳으로 갑니다. 아직 안 만든 채널은 빈 문자열로 들어오고,
+          # clipper.py 가 공용 채널로 떨어뜨리므로 지금 넣어둬도 안전합니다.
+          TELEGRAM_CHAT_ID_NUCLEAR: ${{ secrets.TELEGRAM_CHAT_ID_NUCLEAR }}
+          TELEGRAM_CHAT_ID_CONSTRUCTION: ${{ secrets.TELEGRAM_CHAT_ID_CONSTRUCTION }}
+          TELEGRAM_CHAT_ID_UTILITY: ${{ secrets.TELEGRAM_CHAT_ID_UTILITY }}
+          TELEGRAM_CHAT_ID_EQUIPMENT: ${{ secrets.TELEGRAM_CHAT_ID_EQUIPMENT }}
         # 기다리는 경로는 수집·선별을 먼저 끝내고 SEND_AT 정각에 전송합니다.
         # 버튼 수동 실행은 누른 즉시 보내야 하므로 --send-at 을 붙이지 않습니다.
         run: |
