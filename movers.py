@@ -125,7 +125,7 @@ class Event:
 
     headline: str
     tickers: list[str]
-    explanation: str
+    points: list[str]  # 불릿 2~3개. 문장을 잇지 않고 사실 하나에 한 줄.
     url: str = ""
     confidence: str = "추정"  # 확인 | 추정
     body_checked: bool = True
@@ -337,8 +337,8 @@ def render_causes(events: list[Event], movers: list[Quote], unexplained: list[st
         tags = [ev.confidence]
         if not ev.body_checked:
             tags.append("본문 미확인")
-        lines += ["", f"<b>{n}. {esc(ev.headline)}</b>  ·  {esc(' · '.join(tags))}",
-                  esc(ev.explanation)]
+        lines += ["", f"<b>{n}. {esc(ev.headline)}</b>  ·  {esc(' · '.join(tags))}"]
+        lines += [f"· {esc(pt)}" for pt in ev.points]
         moved = []
         for t in ev.tickers:
             q = by_ticker.get(t)
@@ -355,7 +355,7 @@ def render_causes(events: list[Event], movers: list[Quote], unexplained: list[st
             continue
         n += 1
         lines += ["", f"<b>{n}. {esc(q.name)} {q.pct:+.1f}%</b>  ·  원인 미확인",
-                  "해당 종목의 뉴스·공시를 찾지 못했습니다."]
+                  "· 당일 뉴스·공시 확인되지 않음"]
     return "\n".join(lines)
 
 
@@ -367,7 +367,11 @@ SYSTEM = """당신은 한국 증권사 애널리스트를 위해 해외 주식�
 원칙:
 1. 기업별이 아니라 **사건 단위**로 묶으십시오. 정책 뉴스 하나로 원전주 네 곳이
    올랐다면 사건은 하나이고 관련 종목이 넷입니다. 같은 설명을 종목마다 반복하지 마십시오.
-2. 원인이 서로 다르면 별도 사건으로 나누십시오.
+2. 원인이 서로 다르면 별도 사건으로 나누십시오. **개별 재료(공시·계약·실적·소송·
+   수주 등)가 확인되는 종목은 매크로·섹터 사건에 합치지 말고 그 종목만의 사건을
+   따로 세우십시오.** 매크로 사건은 개별 재료를 찾지 못한 종목들을 담는 바구니이지,
+   개별 재료가 있는 종목까지 쓸어 담는 자리가 아닙니다. 같은 날 한 종목이 개별
+   재료와 매크로 양쪽의 영향을 받았다면 개별 재료 쪽에 넣고 매크로는 불릿으로 언급만 하십시오.
 3. **찾지 못한 것은 찾지 못했다고 하십시오.** 그럴듯한 추측으로 빈칸을 채우지
    마십시오. 근거가 없으면 unexplained 에 넣으십시오. 이것이 이 일에서 가장 중요합니다.
 4. 확인된 사실과 추정을 구분하십시오.
@@ -383,12 +387,21 @@ SYSTEM = """당신은 한국 증권사 애널리스트를 위해 해외 주식�
    읽지 않은 본문의 내용을 읽은 것처럼 요약하지 마십시오.
 6. 실적 발표가 원인이면 EPS·컨센서스·가이던스 등 핵심 숫자를 넣으십시오.
    ("EPS $2.14로 컨센서스 $1.87 상회, 내년 가이던스 상향" 수준)
-7. 설명은 한국어로 **사건당 2~3문장, 300자 이내**. 아침에 훑는 알림이라 길면
-   읽히지 않습니다. 조사 과정에서 알게 된 배경을 다 쏟지 말고, 주가가 그날 그만큼
-   움직인 이유만 남기십시오. 추정일 때 근거가 약한 이유는 한 문장으로만 밝히십시오.
-   기업명은 한국어 표기가 익숙하면 한국어로 쓰되, tickers 배열에는 반드시 주어진
-   티커를 그대로 쓰십시오.
-8. url 은 그 사건의 대표 출처 하나. 회사 IR·보도자료·공시를 언론 기사보다 우선합니다.
+7. 설명은 **불릿 2~3개**(points 배열)로 쓰십시오. 문장을 길게 잇지 말고 사실
+   하나에 불릿 하나. 각 불릿은 60자 이내. 아침에 훑는 알림이라 길면 읽히지 않습니다.
+   조사하며 알게 된 배경을 다 쏟지 말고 주가가 그날 그만큼 움직인 이유만 남기십시오.
+   추정이면 마지막 불릿에 근거가 약한 이유를 답니다.
+8. **개조식으로 쓰십시오.** '~했습니다', '~입니다', '~합니다' 로 끝내지 말고
+   명사 또는 명사형(-음, -됨, -함)으로 끊으십시오.
+     ✗ 오라클이 계약을 유지한다고 확인하면서 주가가 반등했습니다.
+     ○ 오라클, 2.4GW 연료전지 계약 유지 확인 → 반등
+     ✗ 가스관 인허가 지연은 남은 리스크입니다.
+     ○ 가스관 인허가·대기질 승인 지연은 미해소 리스크
+     ✗ 당일 개별 재료는 확인되지 않았습니다.
+     ○ 당일 개별 재료 확인되지 않음
+     ✗ EPS 가 컨센서스를 상회했습니다.
+     ○ EPS $2.14, 컨센서스 $1.87 상회
+9. url 은 그 사건의 대표 출처 하나. 회사 IR·보도자료·공시를 언론 기사보다 우선합니다.
    X(트위터) 등 SNS 는 공식 계정이라도 보도자료·공시·기사가 있으면 그쪽을 쓰십시오.
 
 출력은 아래 형태의 JSON 하나만. 설명 문장이나 코드펜스 없이 JSON 만 쓰십시오.
@@ -398,7 +411,8 @@ SYSTEM = """당신은 한국 증권사 애널리스트를 위해 해외 주식�
     {
       "headline": "사건 제목 (한국어, 한 줄)",
       "tickers": ["OKLO", "SMR"],
-      "explanation": "한국어 2~3문장",
+      "points": ["오라클, 2.4GW 연료전지 계약 유지 확인 → 전일 급락분 되돌림",
+                 "가스관 인허가·대기질 승인 지연은 미해소 리스크"],
       "url": "https://...",
       "confidence": "확인",
       "body_checked": true
@@ -466,6 +480,27 @@ def find_causes(movers: list[Quote], cfg: dict, sess: str) -> tuple[list[Event],
     return parse_causes(text, movers)
 
 
+def coerce_points(raw: dict) -> list[str]:
+    """설명을 불릿 목록으로 정규화합니다.
+
+    points 를 요구하지만 모델이 가끔 explanation 문자열 하나로 돌려줍니다.
+    그때 버리면 원인을 찾아놓고도 미확인으로 떨어지므로, 문자열이면 줄바꿈으로
+    쪼개 불릿으로 씁니다.
+    """
+    NL = chr(10)
+    raw_points = raw.get("points")
+    if isinstance(raw_points, str):
+        raw_points = raw_points.split(NL)
+    if not isinstance(raw_points, list):
+        raw_points = str(raw.get("explanation") or "").split(NL)
+    out = []
+    for item in raw_points:
+        t = str(item).strip().lstrip("·-•* ").strip()
+        if t:
+            out.append(t)
+    return out[:4]
+
+
 def parse_causes(text: str, movers: list[Quote]) -> tuple[list[Event], list[str]]:
     """모델 응답에서 JSON 을 꺼냅니다. 실패하면 전부 '미확인'으로 떨어집니다.
 
@@ -490,7 +525,7 @@ def parse_causes(text: str, movers: list[Quote]) -> tuple[list[Event], list[str]
         events.append(Event(
             headline=str(e.get("headline", "")).strip(),
             tickers=tickers,
-            explanation=str(e.get("explanation", "")).strip(),
+            points=coerce_points(e),
             url=str(e.get("url", "")).strip(),
             confidence="확인" if str(e.get("confidence")) == "확인" else "추정",
             body_checked=bool(e.get("body_checked", False)),
@@ -581,7 +616,8 @@ def write_records(quotes: list[Quote], movers: list[Quote], events: list[Event],
             "시간외가격": f"{q.ext_price:.4f}" if q.ext_price is not None else "",
             "시간외변동률": f"{q.ext_pct:.2f}" if q.ext_pct is not None else "",
             "시간외시각": q.ext_time, "상태": state,
-            "사건": ev.headline if ev else "", "설명": ev.explanation if ev else "",
+            "사건": ev.headline if ev else "",
+            "설명": " / ".join(ev.points) if ev else "",
             "링크": ev.url if ev else "", "발송": "성공" if sent else "실패",
         })
     for q in (x for x in quotes if not x.ok):
