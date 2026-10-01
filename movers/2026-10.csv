@@ -1,0 +1,3 @@
+﻿거래일,조회시각,섹터,기업명,티커,통화,전일종가,종가,변동률,종가출처,시간외가격,시간외변동률,시간외시각,상태,사건,설명,링크,발송
+2026-10-01,2026-10-02 07:30:01+0900,분산발전·DC전원,Vicor,VICR,USD,288.9400,308.5900,6.80,일봉 종가,314.2678,1.84,10-01 18:21 EDT,확인,"Vicor, 9/30 장마감 후 Q3 매출 가이던스 2차 상향 (VPD 라이선스 로열티)","9/30 16:00 ET 보도자료, Q3 전분기比 성장 >20%→>30% 상향 / VPD 첫 비독점 라이선스 로열티 예상 상회가 근거, 9/21 이후 10일 만의 2차 상향 / 장중 +9.7%($317)까지 상승 후 종가 +6.8%로 축소",https://vicorcorporation.gcs-web.com/news-releases/news-release-details/vicor-corporation-raises-q3-2026-revenue-guidance-0,성공
+2026-10-01,2026-10-02 07:30:01+0900,원전·연료,Constellation,CEG,,,,,,,,,조회 실패: OperationalError: database is locked,,,,성공
