@@ -30,6 +30,8 @@ from urllib.parse import quote
 
 import feedparser
 import requests
+
+import vault  # 옵시디언 위키 저장 (VAULT_REPO/VAULT_TOKEN 없으면 건너뜀)
 import yaml
 from pydantic import BaseModel, Field
 
@@ -1006,6 +1008,42 @@ def split_message(text: str, limit: int = 3900) -> list[str]:
     return chunks
 
 
+def render_markdown(curation: Curation | None, shortlist: list[Cluster], sector: str,
+                    day: datetime) -> str:
+    """옵시디언 위키에 남길 하루치 목록. 텔레그램과 같은 기사, 같은 순서."""
+    lines = [
+        "---",
+        f"섹터: {VAULT_SECTOR.get(sector, sector)}",
+        f"종류: 데일리클리핑 ({sector})",
+        f"날짜: {day:%Y-%m-%d}",
+        "---",
+        f"# {sector} 데일리 클리핑 {day:%Y-%m-%d}",
+        "",
+    ]
+    picked = ([(shortlist[p.id - 1], p.tags, p.title_ko) for p in curation.picks]
+              if curation and curation.picks else [(c, [], "") for c in shortlist[:8]])
+    for c, tags, title_ko in picked:
+        title = (title_ko or "").strip() or c.lead.title
+        outlets = c.outlets if hasattr(c, "outlets") else []
+        more = f" 외 {len(outlets) - 1}곳" if len(outlets) > 1 else ""
+        tag_s = " ".join(f"#{hashtag(t)}" for t in tags[:3] if hashtag(t))
+        lines.append(f"- [{title}]({c.lead.url}) — {c.lead.outlet}{more} {tag_s}".rstrip())
+    return "\n".join(lines) + "\n"
+
+
+# 데일리 클리핑 섹터 → 위키 섹터. 전력기기는 위키에서 '유틸리티' 안에 있다.
+VAULT_SECTOR = {"전력기기": "유틸리티"}
+
+
+def save_to_vault(md: str, sector: str, day: datetime) -> None:
+    folder = VAULT_SECTOR.get(sector, sector)
+    path = f"20_Work/{folder}/데일리클리핑/{day:%Y-%m}/{day:%Y-%m-%d}_{sector}.md"
+    if vault.put(path, md, f"daily clipping: {sector} {day:%Y-%m-%d}"):
+        print(f"      위키 저장: {path}")
+    else:
+        print(f"  ! 위키 저장 실패: {path}", file=sys.stderr)
+
+
 def send_telegram(chunks: list[str], chat_id_env: str = "") -> bool:
     """한 섹터의 메시지를 보냅니다.
 
@@ -1143,6 +1181,7 @@ def main() -> int:
     # 만드는 데 1~2분이 걸리는데, 이걸 목표 시각 뒤로 미루면 도착이 그만큼
     # 밀립니다. 준비를 앞당겨 놓아야 --send-at 으로 초 단위를 맞출 수 있습니다.
     ready: list[tuple[list[str], str]] = []  # (메시지 조각, chat_id 환경변수명)
+    to_vault: list[tuple[str, str]] = []  # (마크다운, 섹터) — 텔레그램 발송 뒤 위키에 저장
     for d in digests:
         sector, size = d["sector"], d["size"]
         shortlist = shortlist_for(sector, d["pool"], scored, cfg)
@@ -1163,6 +1202,8 @@ def main() -> int:
                 print(f"  {star}{i:2d}. [{c.score:5.1f}] ({len(c.outlets)}곳) {c.lead.title[:64]}")
         else:
             ready.append((chunks, d.get("chat_id_env", "")))
+            if vault.enabled():
+                to_vault.append((render_markdown(curation, shortlist, sector, now), sector))
 
     if args.dry_run:
         return 0
@@ -1173,6 +1214,10 @@ def main() -> int:
     for chunks, chat_id_env in ready:
         if send_telegram(chunks, chat_id_env):
             sent += 1
+
+    # 위키 저장은 발송 뒤에 한다. 정시 발송이 이 일 때문에 밀리면 안 된다.
+    for md, sector in to_vault:
+        save_to_vault(md, sector, now)
 
     print(f"[5/5] 텔레그램 전송 완료 — {sent}/{len(digests)}개 섹터"
           f" ({datetime.now(tz):%H:%M:%S} KST)")

@@ -154,6 +154,9 @@ jobs:
           TELEGRAM_CHAT_ID_CONSTRUCTION: ${{ secrets.TELEGRAM_CHAT_ID_CONSTRUCTION }}
           TELEGRAM_CHAT_ID_UTILITY: ${{ secrets.TELEGRAM_CHAT_ID_UTILITY }}
           TELEGRAM_CHAT_ID_EQUIPMENT: ${{ secrets.TELEGRAM_CHAT_ID_EQUIPMENT }}
+          # 옵시디언 위키(비공개 저장소). 없으면 위키 저장만 건너뛰고 텔레그램은 그대로.
+          VAULT_REPO: ${{ secrets.VAULT_REPO }}
+          VAULT_TOKEN: ${{ secrets.VAULT_TOKEN }}
         # 기다리는 경로는 수집·선별을 먼저 끝내고 SEND_AT 정각에 전송합니다.
         # 버튼 수동 실행은 누른 즉시 보내야 하므로 --send-at 을 붙이지 않습니다.
         run: |
