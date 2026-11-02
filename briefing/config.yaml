@@ -1,0 +1,87 @@
+# 모의 포트폴리오 시작 현금 (통화별로 따로 굴린다, 환전 없음)
+cash:
+  KRW: 10000000
+  USD: 10000
+fee_rate: 0.0025          # 매수·매도 각각 거래대금 × 이 비율
+
+# 안내 신호 기준값
+signals:
+  drawdown: 0.15          # 52주 고점 대비 -15% 이하
+  ma: 200                 # 장기 이동평균 기간
+  day_move: 0.04          # 하루 ±4% 이상
+  vix_level: 25           # VIX 이 이상이면 경고
+  vix_jump: 0.15          # VIX 하루 +15% 이상
+  vol_mult: 1.5           # 돌파 타점: 거래량이 50일 평균의 이 배수 이상
+  chase: 0.05             # 돌파 기준선 위 +5% 넘으면 추격 구간
+  pivot_skip: 20          # 돌파 기준선 = 최근 20일을 뺀 52주 고점
+
+# 워치리스트 (yfinance 티커. 한국은 .KS / .KQ 붙임). 그룹 이름은 표 제목으로 쓰인다
+watchlist:
+  지수·원자재:
+    ^GSPC: S&P500
+    ^NDX: 나스닥100
+    ^STOXX50E: 유로스톡스50
+    CL=F: WTI 유가
+  국내 ETF:
+    069500.KS: KODEX 200
+    229200.KS: KODEX 코스닥150
+    091160.KS: KODEX 반도체
+    133690.KS: TIGER 미국나스닥100
+  미국 ETF:
+    BIZD: BDC
+    DVY: 고배당
+    RSP: S&P 동일가중
+    IWO: 러셀2000 성장
+    IVE: S&P500 가치
+    EEM: 신흥국
+    EWY: 한국
+    DRAM: 메모리
+    SOXX: 반도체
+    MAGS: 매그7
+    IGV: 소프트웨어
+    URA: 우라늄
+    LIT: 리튬·2차전지
+    ITA: 방산
+    SHLD: 방산테크
+    XLI: 산업재
+    ITB: 주택건설
+    XLP: 필수소비재
+    XRT: 소매
+    PEJ: 레저·엔터
+    JETS: 항공
+    GRID: 스마트그리드
+    KRE: 지역은행
+    ROBO: 로봇
+    XLE: 에너지
+    XME: 금속·광업
+    ICLN: 클린에너지
+    HYDR: 수소
+    XBI: 바이오
+    XLV: 헬스케어
+    TLT: 미국 장기채
+    GLD: 금
+  미국 개별주:
+    NVDA: 엔비디아
+    MU: 마이크론
+    SNDK: 샌디스크
+    LITE: 루멘텀
+    CRWV: 코어위브
+    NBIS: 네비우스
+    INTC: 인텔
+    AMZN: 아마존
+    META: 메타
+    MSFT: 마이크로소프트
+    ORCL: 오라클
+    LLY: 일라이릴리
+    MRK: 머크
+    HALO: 할로자임
+    VLO: 발레로 에너지
+
+# FRED 매크로 시리즈 (단위 %, 변화는 bp)
+macro:
+  DGS2: 미국 2년물
+  DGS10: 미국 10년물
+  DGS30: 미국 30년물
+  DFII30: 30년 실질금리(TIPS)
+  T10YIE: 10년 기대인플레(BEI)
+  BAMLH0A0HYM2: 하이일드 스프레드

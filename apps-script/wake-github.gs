@@ -26,6 +26,7 @@ const TRIGGER_HOUR = 5; // KST 05시대에 한 번 (05:00~06:00 사이 임의 �
 // 깨울 워크플로 목록. 각자 발송 시각까지 스스로 기다리므로, 여기서는
 // 그냥 둘 다 깨워 두면 됩니다. 한쪽이 실패해도 다른 쪽은 깨웁니다.
 const WORKFLOWS = [
+  { file: 'briefing.yml', label: '아침 투자 브리핑 (06:30)' },
   { file: 'daily-clipping.yml', label: '뉴스 클리핑 (07:00)' },
   { file: 'movers.yml', label: '해외 급등락 (07:30)' },
 ];
@@ -54,9 +55,7 @@ function wakeAll(wait) {
     }
   }
   if (failed.length) {
-    throw new Error('일부 워크플로를 깨우지 못했습니다
-' + failed.join('
-'));
+    throw new Error('일부 워크플로를 깨우지 못했습니다\n' + failed.join('\n'));
   }
 }
 

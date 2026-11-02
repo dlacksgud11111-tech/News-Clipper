@@ -1,0 +1,134 @@
+name: 아침 투자 브리핑
+
+# ─────────────────────────────────────────────────────────────
+#  movers.yml 과 같은 구조입니다 (도착이 보장되지 않는 GitHub 예약을
+#  '일찍 깨어나 정시까지 기다리기'로 보완). 클리핑·급등락과 사고를
+#  나누려고 워크플로를 따로 둡니다.
+#
+#  발송 06:30 → 클리핑 07:00 → 급등락 07:30 순서입니다.
+#  미국 정규장 마감(서머타임 05:00 / 해제 06:00 KST) 뒤라 전날 종가가 잡힙니다.
+# ─────────────────────────────────────────────────────────────
+on:
+  schedule:
+    # UTC 16:02 ~ 21:42 = KST 01:02 ~ 06:42, 20분 간격.
+    # 클리핑(7,27,47분)·급등락(12,32,52분)과 어긋나게 2,22,42분.
+    - cron: "2,22,42 16-21 * * *"
+
+  # 앱스 스크립트(apps-script/wake-github.gs)가 새벽 5시대에 한 번 깨웁니다.
+  workflow_dispatch:
+    inputs:
+      wait:
+        description: "발송 시각까지 기다렸다 보내기 (끄면 즉시 발송)"
+        type: boolean
+        default: false
+
+# briefing/ 아래 기록(briefs/*.json·state.json)을 다시 커밋하기 위해 필요합니다.
+permissions:
+  contents: write
+
+concurrency:
+  group: briefing
+  cancel-in-progress: false
+
+env:
+  SEND_AT: "06:30" # 목표 발송 시각 (KST)
+  # 60여 종목 + FRED 6개 조회에 2~3분. 넉넉히 10분 전에 시작합니다.
+  PREP_MIN: "10"
+  # 가장 이른 칸(KST 01:02)에서 06:20 까지가 318분입니다.
+  MAX_WAIT_MIN: "330"
+
+jobs:
+  briefing:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: 오늘 날짜 (KST)
+        id: day
+        run: echo "today=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: 오늘 이미 보냈는지 확인
+        id: guard
+        uses: actions/cache/restore@v4
+        with:
+          path: .briefing-sent
+          key: briefing-sent-${{ steps.day.outputs.today }}
+
+      - name: 이미 보냈으면 여기서 끝
+        if: steps.guard.outputs.cache-hit == 'true'
+        run: echo "오늘(${{ steps.day.outputs.today }}) 이미 발송했습니다. 종료합니다."
+
+      - uses: actions/checkout@v4
+        if: steps.guard.outputs.cache-hit != 'true'
+
+      - uses: actions/setup-python@v5
+        if: steps.guard.outputs.cache-hit != 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+        if: steps.guard.outputs.cache-hit != 'true'
+
+      - name: 준비 시작 시각까지 대기
+        if: steps.guard.outputs.cache-hit != 'true' && (github.event_name == 'schedule' || inputs.wait)
+        run: |
+          now=$(date +%s)
+          target=$(TZ=Asia/Seoul date -d "today ${SEND_AT}" +%s)
+          prep=$(( target - PREP_MIN * 60 ))
+          wait=$(( prep - now ))
+          echo "현재 $(TZ=Asia/Seoul date +'%m/%d %H:%M') KST"
+          if [ "$wait" -le 0 ]; then
+            echo "이미 준비 시작 시각을 지났습니다. 바로 진행합니다."
+            exit 0
+          fi
+          cap=$(( MAX_WAIT_MIN * 60 ))
+          [ "$wait" -gt "$cap" ] && wait=$cap
+          echo "$(( wait / 60 ))분 대기합니다."
+          sleep "$wait"
+
+      - name: 대기 중에 누가 보냈는지 재확인
+        id: guard2
+        if: steps.guard.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: .briefing-sent
+          key: briefing-sent-${{ steps.day.outputs.today }}
+
+      - name: 조회·브리핑 작성·전송
+        id: run
+        if: steps.guard.outputs.cache-hit != 'true' && steps.guard2.outputs.cache-hit != 'true'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          # 전용 채널을 만들면 이 시크릿만 추가하면 됩니다. 없으면 개인 DM 으로 갑니다.
+          TELEGRAM_CHAT_ID_BRIEF: ${{ secrets.TELEGRAM_CHAT_ID_BRIEF }}
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ] || [ "${{ inputs.wait }}" = "true" ]; then
+            python briefing/send.py --marker .briefing-sent --send-at "$SEND_AT"
+          else
+            python briefing/send.py --marker .briefing-sent
+          fi
+
+      - name: 발송했으면 오늘 표시 저장
+        if: steps.guard.outputs.cache-hit != 'true' && steps.guard2.outputs.cache-hit != 'true' && hashFiles('.briefing-sent') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .briefing-sent
+          key: briefing-sent-${{ steps.day.outputs.today }}
+
+      # briefs/*.json 이 '어제 대비' 비교의 기준이라 커밋돼야 다음 날 비교가 됩니다.
+      - name: 기록 커밋
+        if: always() && steps.run.outcome == 'success'
+        continue-on-error: true
+        run: |
+          if [ -z "$(git status --porcelain briefing)" ]; then
+            echo "기록에 변화가 없습니다."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add briefing
+          git commit -m "briefing: $(TZ=Asia/Seoul date +%F) 기록"
+          git pull --rebase --autostash origin "${GITHUB_REF_NAME}" || true
+          git push origin "HEAD:${GITHUB_REF_NAME}"

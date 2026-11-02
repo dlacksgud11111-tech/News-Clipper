@@ -7,3 +7,4 @@ venv/
 # 워크플로가 '오늘 보냈다' 표시로 만드는 파일. 캐시로만 오가고 커밋 대상이 아닙니다.
 .sent-marker
 .movers-sent
+.briefing-sent
