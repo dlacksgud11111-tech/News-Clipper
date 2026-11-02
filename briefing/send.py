@@ -24,69 +24,82 @@ SHOW = 15  # 어제 대비 목록을 이 개수까지만 펼침
 
 
 def label(row):
-    return f"{row['name']}({row['t']})"
+    """'XLE (에너지)' — 티커 뒤 괄호에 설명."""
+    return esc(f"{row['t']} ({row['name']})")
+
+
+def section(title, lines):
+    return ["", f"<b>{title}</b>"] + (lines or ["  · 없음"])
 
 
 def render(data, d):
     rows = [r for r in data["rows"] if r["s"]]
+    by_t = {r["t"]: r for r in rows}
     now = now_kst()
-    us = next((r["date"] for r in rows if r["t"] == "^GSPC"), "")
+    us = by_t.get("^GSPC", {}).get("date", "")
     kr = next((r["date"] for r in rows if r["t"].endswith(".KS")), "")
     out = [f"<b>📋 투자 브리핑 · {now.month}/{now.day}({weekday_ko(now.date())})</b>",
            f"<i>미국 {us[5:]} · 한국 {kr[5:]} 종가 기준</i>"]
 
-    out += ["", "──── 그룹 ────"]
+    grp = []
     for g in desk.CFG["watchlist"]:
         got = [r for r in rows if r["group"] == g]
         if got:
             avg = sum(r["s"]["chg"] for r in got) / len(got)
             above = sum(1 for r in got if r["s"]["above_ma"])
-            out.append(f"{esc(g)}  평균 {avg:+.1%} · 200일선 위 {above}/{len(got)}")
+            grp.append(f"  {'🔺' if avg > 0 else '🔻'} {esc(g)}  {avg:+.1%} · 200일선 위 {above}/{len(got)}")
+    out += section("📊 그룹 평균", grp)
 
     if d:
-        out += ["", f"──── {d['since'][5:]} 대비 ────"]
-        for mark, key in (("🆕 새로 걸림", "new"), ("✅ 풀림", "gone")):
+        chg = []
+        for mark, key in (("🆕", "new"), ("✅", "gone")):
             items = d[key]
-            body = "; ".join(f"{t} {x}" for t, x in items[:SHOW]) + (f" 외 {len(items) - SHOW}건" if len(items) > SHOW else "")
-            out.append(f"{mark} {len(items)}: {esc(body) or '-'}")
-        out.append(f"· 계속 {len(d['kept'])}건")
+            chg += [f"  {mark} {esc(t)} {esc(x)}" for t, x in items[:SHOW]]
+            if len(items) > SHOW:
+                chg.append(f"  {mark} … 외 {len(items) - SHOW}건")
+        chg.append(f"  ➖ 그대로 {len(d['kept'])}건")
+        out += section(f"🔄 {d['since'][5:]} 대비 (🆕 새로 걸림 / ✅ 풀림)", chg)
     else:
-        out += ["", "<i>첫 브리핑 — 비교는 다음 회차부터</i>"]
+        out += ["", "<i>🔄 첫 브리핑 — 어제 대비는 다음 회차부터</i>"]
 
-    def pick(pred):
-        return [r for r in rows if any(pred(x) for x in r["sig"])]
+    def having(sig):
+        return [r for r in rows if sig in r["sig"]]
 
-    hi, lo = pick(lambda x: x == "52주 신고가"), pick(lambda x: x == "52주 신저가")
-    out += ["", "──── 신고가 / 신저가 ────",
-            "▲ " + (esc(", ".join(map(label, hi))) or "-"),
-            "▼ " + (esc(", ".join(map(label, lo))) or "-")]
+    out += section("🏆 52주 신고가", [f"  · {label(r)}" for r in having("52주 신고가")])
+    out += section("🧊 52주 신저가", [f"  · {label(r)}" for r in having("52주 신저가")])
 
-    brk = [f"{label(r)} {x}" for r in rows for x in r["sig"] if x.startswith("돌파 ")]
-    chase = [f"{r['t']} {x.split(' ')[2]}" for r in rows for x in r["sig"] if x.endswith("추격구간")]
-    out += ["", "──── 타점 ────",
-            "🎯 " + (esc(", ".join(brk)) or "돌파 없음"),
-            "⚠️ 추격구간: " + (esc(", ".join(chase)) or "-")]
+    tp = []
+    for r in rows:
+        for x in r["sig"]:
+            if x.startswith("돌파 "):
+                tp.append(f"  🟢 돌파  {label(r)} · {esc(x[3:].lstrip('+'))}")
+            elif x.endswith("추격구간"):
+                tp.append(f"  🟠 추격주의  {label(r)} · 돌파선 {x.split(' ')[2]}")
+    out += section("🎯 타점", tp)
 
-    moves = sorted((r for r in rows if any("급변" in x for x in r["sig"])), key=lambda r: r["s"]["chg"])
+    moves = sorted((r for r in rows if any("급변" in x for x in r["sig"])), key=lambda r: (r["s"]["chg"] <= 0, -abs(r["s"]["chg"])))  # 급등 큰 순 → 급락 큰 순
     ma_n = desk.CFG["signals"]["ma"]
-    broke = [r["t"] for r in rows if f"{ma_n}일선 이탈" in r["sig"]]
-    back = [r["t"] for r in rows if f"{ma_n}일선 회복" in r["sig"]]
-    out += ["", f"──── 급변 ±{desk.CFG['signals']['day_move']:.0%} ────",
-            esc(" · ".join(f"{r['t']} {r['s']['chg']:+.1%}" for r in moves)) or "-",
-            f"{ma_n}일선 이탈: {esc(', '.join(broke)) or '-'} / 회복: {esc(', '.join(back)) or '-'}"]
+    mv = [f"  {'🔺' if r['s']['chg'] > 0 else '🔻'} {r['s']['chg']:+.1%}  {label(r)}" for r in moves]
+    mv += [f"  📉 {ma_n}일선 이탈  {label(r)}" for r in having(f"{ma_n}일선 이탈")]
+    mv += [f"  📈 {ma_n}일선 회복  {label(r)}" for r in having(f"{ma_n}일선 회복")]
+    out += section(f"⚡ 급변 ±{desk.CFG['signals']['day_move']:.0%} · {ma_n}일선", mv)
 
-    out += ["", "──── 매크로 ────"]
+    mac = []
+    wti = by_t.get("CL=F")
+    if wti:
+        mac.append(f"  🛢️ WTI 유가  <b>{wti['s']['last']:.2f}</b>  {wti['s']['chg']:+.1%}")
     for m in data["macro"]:
         v = m["m"]
         if v is None:
-            out.append(f"{esc(m['name'])}  데이터 없음")
+            mac.append(f"  · {esc(m['name'])}  데이터 없음")
             continue
         d20 = "" if v["d20"] is None else f" (20D {v['d20']:+.0f}bp)"
         tag = f" · {', '.join(m['sig'])}" if m["sig"] else ""
-        out.append(f"{esc(m['name'])}  <b>{v['last']:.2f}</b>  {v['d1']:+.0f}bp{d20}{esc(tag)}")
+        mac.append(f"  · {esc(m['name'])}  <b>{v['last']:.2f}</b>  {v['d1']:+.0f}bp{d20}{esc(tag)}")
     if data["vix"]:
         v = data["vix"]
-        out.append(f"VIX  <b>{v['s']['last']:.1f}</b>  {v['s']['chg']:+.1%}  {esc(', '.join(v['sig']) or '평온')}")
+        mac.append(f"  😨 VIX  <b>{v['s']['last']:.1f}</b>  {v['s']['chg']:+.1%} · {esc(', '.join(v['sig']) or '평온')}")
+    out += section("🌐 매크로", mac)
 
     if data["fails"]:
         out += ["", "⚠️ 조회 실패: " + esc(", ".join(data["fails"]))]
