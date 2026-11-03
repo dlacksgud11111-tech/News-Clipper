@@ -60,6 +60,11 @@ on:
         type: boolean
         default: false
 
+# actions: write = 아래 '브리핑·급등락 깨우기' 단계가 다른 워크플로를 dispatch 하려고.
+permissions:
+  contents: read
+  actions: write
+
 concurrency:
   group: daily-clipping
   cancel-in-progress: false
@@ -79,6 +84,20 @@ jobs:
     timeout-minutes: 330 # MAX_WAIT_MIN + 수집·선별·전송 여유분
 
     steps:
+      # 앱스 스크립트가 매일 05시대에 이 워크플로만 확실히 깨워줍니다(실측: 급등락·
+      # 브리핑은 GitHub 예약에만 기대다 08~09시에 도착). 그래서 여기서 둘을 대신
+      # 깨웁니다. 각자 발송 시각까지 기다리고 중복 발송은 각자의 캐시가 막습니다.
+      # 실패해도 클리핑은 계속 갑니다.
+      - name: 브리핑·급등락 깨우기
+        if: github.event_name == 'workflow_dispatch' && inputs.wait
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for wf in briefing.yml movers.yml; do
+            gh workflow run "$wf" --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" -f wait=true && echo "깨움: $wf"
+          done
+
       - name: 오늘 날짜 (KST)
         id: day
         run: echo "today=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
