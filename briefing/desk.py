@@ -199,7 +199,15 @@ def fetch(t):
     try:
         with warnings.catch_warnings():  # yfinance가 필터를 덮어써서 여기서 막음
             warnings.simplefilter("ignore")
-            h = yf.Ticker(t).history(period="2y", auto_adjust=True)
+            y = yf.Ticker(t)
+            h = y.history(period="2y", auto_adjust=True)
+            # 야후가 최신 일봉 종가를 NaN으로 줄 때가 있음(2026-11-02 실측) → 그날 마지막 1시간봉으로 채움
+            if not h.empty and h["Close"].isna().iloc[-1]:
+                hr = y.history(period="5d", interval="1h").dropna(subset=["Close"])
+                day = h.index[-1].date()
+                same = hr[[i.date() == day for i in hr.index]]
+                if len(same):
+                    h.loc[h.index[-1], "Close"] = float(same["Close"].iloc[-1])
     except Exception:
         return None
     h = h.dropna(subset=["Close"]) if not h.empty else h
